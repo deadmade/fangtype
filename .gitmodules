@@ -1,3 +1,4 @@
 [submodule "auto_type/tests/benchmarks/data/TypeEvalPy"]
 	path = auto_type/tests/benchmarks/data/TypeEvalPy
 	url = https://github.com/secure-software-engineering/TypeEvalPy.git
+	ignore = all

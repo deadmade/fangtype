@@ -4,7 +4,7 @@ import ast
 from dataclasses import dataclass
 from enum import Enum
 
-from auto_type.inference.literal_inference import LiteralInferenceEngine
+from auto_type.inference import UnifiedInferenceEngine
 from tests.benchmarks.typeevalpy.loader import AnnotationType, BenchmarkCase
 
 
@@ -115,7 +115,7 @@ def analyze_failure(case: BenchmarkCase) -> str:
         return "analysis_failed"
 
 
-def run_inference_on_case(case: BenchmarkCase, engine: LiteralInferenceEngine) -> InferenceResult:
+def run_inference_on_case(case: BenchmarkCase, engine: UnifiedInferenceEngine) -> InferenceResult:
     """Run inference on single case and categorize result."""
 
     # Skip non-simple-variables (out of scope)
@@ -127,11 +127,17 @@ def run_inference_on_case(case: BenchmarkCase, engine: LiteralInferenceEngine) -
             reason=f"{case.annotation_type.value}",
         )
 
-    # Run inference on entire source file
-    inferred_types = engine.infer_variable_types(case.source_code)
+    # Run inference to get full scope tree with flow-sensitive types
+    result = engine.infer_types(case.source_code)
+
+    # Query type at specific line number (flow-sensitive lookup)
+    # Convert 1-based line number (from JSON) to 0-based (internal)
+    type_info = result.scope_tree.root.get_variable_type_at_line(
+        case.variable_name, case.line_number - 1
+    )
 
     # Check if our variable was inferred
-    if case.variable_name not in inferred_types:
+    if type_info is None or type_info.type_str == "Unknown":
         # Analyze WHY it wasn't inferred
         reason = analyze_failure(case)
         return InferenceResult(
@@ -139,7 +145,7 @@ def run_inference_on_case(case: BenchmarkCase, engine: LiteralInferenceEngine) -
         )
 
     # We inferred something - is it correct?
-    inferred_type = inferred_types[case.variable_name]
+    inferred_type = type_info.type_str
 
     if type_matches(inferred_type, case.expected_types):
         return InferenceResult(
@@ -156,7 +162,7 @@ def run_inference_on_case(case: BenchmarkCase, engine: LiteralInferenceEngine) -
 
 def run_benchmark(
     cases: list[BenchmarkCase],
-    engine: LiteralInferenceEngine,
+    engine: UnifiedInferenceEngine,
     show_progress: bool = True,
 ) -> BenchmarkResults:
     """Run inference on all cases with progress indicator."""

@@ -1,215 +1,126 @@
-"""Engine for generating diagnostics for type mismatches."""
+"""Engine for generating diagnostics from mypy type checking."""
 
-import ast
-from dataclasses import dataclass
+import logging
 
 from lsprotocol import types
 
-from auto_type.inference.literal_inference import LiteralInferenceEngine
+from auto_type.validation import MypyDiagnostic, MypyTypeValidator
 
-
-@dataclass
-class AnnotatedAssignment:
-    """Represents an annotated variable assignment."""
-
-    var_name: str
-    annotation: str
-    value_node: ast.expr  # The AST node for the value
-    line: int
-    col_start: int
-    col_end: int
+logger = logging.getLogger(__name__)
 
 
 class DiagnosticEngine:
-    """Detects type mismatches between annotations and inferred types."""
+    """Generates LSP diagnostics from mypy type checking.
 
-    def __init__(self, inference_engine: LiteralInferenceEngine) -> None:
+    This engine runs mypy on the entire file and converts all mypy errors,
+    warnings, and notes into LSP diagnostics that can be displayed in the editor.
+    """
+
+    def __init__(self, mypy_validator: MypyTypeValidator) -> None:
         """Initialize the diagnostic engine.
 
         Args:
-            inference_engine: The literal inference engine to use for type inference
+            mypy_validator: The mypy validator to use for type checking
         """
-        self.inference_engine = inference_engine
+        self.mypy_validator = mypy_validator
 
     def generate_diagnostics(self, source: str, uri: str) -> list[types.Diagnostic]:
-        """Find all type mismatches in the source code.
+        """Run mypy and convert all errors to LSP diagnostics.
 
         Args:
             source: The Python source code to analyze
             uri: The document URI (for logging/debugging)
 
         Returns:
-            List of LSP Diagnostic objects for each mismatch
+            List of LSP Diagnostic objects for each mypy issue
         """
-        diagnostics: list[types.Diagnostic] = []
-
-        # Find all annotated assignments in the source
-        annotated_assignments = self._find_annotated_assignments(source)
-
-        # Check each annotated assignment for mismatches
-        for assignment in annotated_assignments:
-            # Infer the type from the value node directly
-            inferred_type = self.inference_engine.infer_from_node(assignment.value_node)
-
-            # Skip if we couldn't infer a type for this variable
-            if inferred_type is None:
-                continue
-
-            # Check for mismatch
-            if self._detect_mismatch(assignment.annotation, inferred_type):
-                diagnostic = self._create_diagnostic(
-                    assignment.var_name,
-                    assignment.annotation,
-                    inferred_type,
-                    assignment.line,
-                    assignment.col_start,
-                    assignment.col_end,
-                )
-                diagnostics.append(diagnostic)
-
-        return diagnostics
-
-    def _find_annotated_assignments(self, source: str) -> list[AnnotatedAssignment]:
-        """Parse AST to find all annotated assignments.
-
-        Example: x: str = 42
-
-        Args:
-            source: The Python source code to parse
-
-        Returns:
-            List of AnnotatedAssignment objects
-        """
-        assignments: list[AnnotatedAssignment] = []
-
         try:
-            tree = ast.parse(source)
-        except SyntaxError:
-            # If source has syntax errors, return empty list
+            # Run mypy validation on the entire file
+            mypy_diagnostics = self.mypy_validator.validate_file_full(source)
+
+            # Convert to LSP diagnostics
+            lsp_diagnostics = []
+            for mypy_diag in mypy_diagnostics:
+                lsp_diag = self._convert_to_lsp_diagnostic(mypy_diag, source)
+                lsp_diagnostics.append(lsp_diag)
+
+            logger.debug(f"Generated {len(lsp_diagnostics)} diagnostics from mypy for {uri}")
+            return lsp_diagnostics
+
+        except Exception as e:
+            logger.error(f"Error generating diagnostics: {e}", exc_info=True)
             return []
 
-        for node in ast.walk(tree):
-            if isinstance(node, ast.AnnAssign):
-                # Only handle simple name targets (not attributes or subscripts)
-                if isinstance(node.target, ast.Name) and node.value is not None:
-                    var_name = node.target.id
-
-                    # Get the annotation as a string
-                    try:
-                        annotation = ast.unparse(node.annotation)
-                    except Exception:
-                        # Skip if we can't unparse the annotation
-                        continue
-
-                    # Get position information
-                    # The range should cover the annotation part only
-                    if hasattr(node.annotation, "lineno") and hasattr(
-                        node.annotation, "col_offset"
-                    ):
-                        line = node.annotation.lineno - 1  # Convert to 0-based
-                        col_start = node.annotation.col_offset
-
-                        # Calculate end column (ensure it's always an int)
-                        if hasattr(node.annotation, "end_col_offset") and node.annotation.end_col_offset is not None:
-                            col_end = node.annotation.end_col_offset
-                        else:
-                            # Fallback: estimate based on annotation length
-                            col_end = col_start + len(annotation)
-
-                        assignments.append(
-                            AnnotatedAssignment(
-                                var_name=var_name,
-                                annotation=annotation,
-                                value_node=node.value,  # Include the value AST node
-                                line=line,
-                                col_start=col_start,
-                                col_end=col_end,
-                            )
-                        )
-
-        return assignments
-
-    def _detect_mismatch(self, annotation: str, inferred_type: str) -> bool:
-        """Compare annotation with inferred type.
-
-        Args:
-            annotation: The type annotation string (e.g., "str")
-            inferred_type: The inferred type string (e.g., "int")
-
-        Returns:
-            True if there's a mismatch, False if they match
-        """
-        # Normalize both types for comparison
-        normalized_annotation = self._normalize_type(annotation)
-        normalized_inferred = self._normalize_type(inferred_type)
-
-        return normalized_annotation != normalized_inferred
-
-    def _normalize_type(self, type_str: str) -> str:
-        """Normalize a type string for comparison.
-
-        Handles equivalences like:
-        - List[int] vs list[int]
-        - Optional[str] vs str | None
-
-        Args:
-            type_str: The type string to normalize
-
-        Returns:
-            Normalized type string
-        """
-        # Strip whitespace
-        normalized = type_str.strip()
-
-        # Convert typing module types to built-in equivalents
-        # List -> list, Dict -> dict, Set -> set, Tuple -> tuple
-        replacements = {
-            "List": "list",
-            "Dict": "dict",
-            "Set": "set",
-            "Tuple": "tuple",
-        }
-
-        for old, new in replacements.items():
-            if normalized.startswith(old + "["):
-                normalized = new + normalized[len(old) :]
-
-        return normalized
-
-    def _create_diagnostic(
-        self,
-        var_name: str,
-        annotation: str,
-        inferred_type: str,
-        line: int,
-        col_start: int,
-        col_end: int,
+    def _convert_to_lsp_diagnostic(
+        self, mypy_diag: MypyDiagnostic, source: str
     ) -> types.Diagnostic:
-        """Create an LSP Diagnostic object for the mismatch.
+        """Convert mypy diagnostic to LSP Diagnostic.
 
         Args:
-            var_name: The variable name
-            annotation: The existing annotation
-            inferred_type: The inferred type
-            line: Line number (0-based)
-            col_start: Start column (0-based)
-            col_end: End column (0-based)
+            mypy_diag: Structured mypy diagnostic
+            source: Source code (used to calculate proper ranges)
 
         Returns:
             LSP Diagnostic object
         """
+        # Downgrade annotation-related errors to warnings for better UX
+        # These are style/completeness issues, not critical errors
+        ANNOTATION_ERROR_CODES = {
+            "no-untyped-def",  # Function without type annotations
+            "no-untyped-call",  # Calling untyped function (if we ever enable it)
+        }
+
+        # Determine actual severity
+        severity = mypy_diag.severity
+        if mypy_diag.severity == "error" and mypy_diag.error_code in ANNOTATION_ERROR_CODES:
+            # Downgrade annotation-related errors to warnings
+            severity = "warning"
+
+        # Map mypy severity to LSP severity
+        severity_map = {
+            "error": types.DiagnosticSeverity.Error,
+            "warning": types.DiagnosticSeverity.Warning,
+            "note": types.DiagnosticSeverity.Information,
+        }
+
+        # Convert line number (mypy uses 1-based, LSP uses 0-based)
+        line = mypy_diag.line - 1
+
+        # Column is already 0-based from mypy
+        start_col = mypy_diag.column
+
+        # Calculate end column
+        # If mypy provided an end column, use it; otherwise estimate
+        if mypy_diag.end_column is not None:
+            end_col = mypy_diag.end_column
+        else:
+            # Try to find a reasonable end position
+            # Default to highlighting a few characters
+            end_col = start_col + 1
+            try:
+                lines = source.splitlines()
+                if 0 <= line < len(lines):
+                    line_text = lines[line]
+                    # Extend to end of word/identifier if possible
+                    if start_col < len(line_text):
+                        pos = start_col
+                        while pos < len(line_text) and (
+                            line_text[pos].isalnum() or line_text[pos] == "_"
+                        ):
+                            pos += 1
+                        if pos > start_col:
+                            end_col = pos
+            except Exception:
+                # Fall back to single character if anything goes wrong
+                pass
+
         return types.Diagnostic(
             range=types.Range(
-                start=types.Position(line=line, character=col_start),
-                end=types.Position(line=line, character=col_end),
+                start=types.Position(line=line, character=start_col),
+                end=types.Position(line=line, character=end_col),
             ),
-            severity=types.DiagnosticSeverity.Warning,
-            source="auto-type",
-            message=f"Type '{annotation}' doesn't match inferred type '{inferred_type}'",
-            code="type-mismatch",
-            data={
-                "inferred_type": inferred_type,
-                "var_name": var_name,
-                "annotation": annotation,
-            },
+            severity=severity_map.get(severity, types.DiagnosticSeverity.Error),
+            source="mypy",
+            message=mypy_diag.message,
+            code=mypy_diag.error_code,
         )

@@ -9,6 +9,7 @@ requires-python = ">=3.12"
 dependencies = [
     "pygls>=2.0.0",
     "libcst>=1.8.0",
+    "mypy>=1.15.0",
 ]
 
 [project.scripts]
@@ -18,8 +19,6 @@ auto-type-server = "auto_type.server:main"
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.1.0",
-    "ruff>=0.6.0",
-    "mypy>=1.11.0",
 ]
 
 [build-system]
