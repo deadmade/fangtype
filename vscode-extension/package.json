@@ -1,0 +1,87 @@
+{
+  "name": "auto-type",
+  "displayName": "Auto Type",
+  "description": "Interactive Python type annotation with ghost text",
+  "version": "0.1.0",
+  "publisher": "auto-type",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "activationEvents": [
+    "onLanguage:python"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "autoType.insertTypeAtCursor",
+        "title": "Auto Type: Insert Type Annotation at Cursor",
+        "category": "Auto Type"
+      },
+      {
+        "command": "autoType.insertAllTypes",
+        "title": "Auto Type: Insert All Type Annotations in File",
+        "category": "Auto Type"
+      },
+      {
+        "command": "autoType.removeTypeAtCursor",
+        "title": "Auto Type: Remove Type Annotation at Cursor",
+        "category": "Auto Type"
+      },
+      {
+        "command": "autoType.removeAllTypes",
+        "title": "Auto Type: Remove All Type Annotations in File",
+        "category": "Auto Type"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "autoType.insertTypeAtCursor",
+        "key": "alt+enter",
+        "when": "editorTextFocus && editorLangId == python"
+      }
+    ],
+    "configuration": {
+      "title": "Auto Type",
+      "properties": {
+        "autoType.serverCommand": {
+          "type": "string",
+          "default": "auto-type-server",
+          "description": "Command to start the auto-type language server"
+        },
+        "autoType.serverArgs": {
+          "type": "array",
+          "default": [],
+          "description": "Arguments to pass to the server command"
+        },
+        "autoType.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the language server"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.0.0"
+  }
+}
