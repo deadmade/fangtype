@@ -1,0 +1,192 @@
+"""Generate markdown reports and export JSON."""
+
+import json
+from collections import defaultdict
+from pathlib import Path
+
+from tests.benchmarks.typeevalpy.analyzer import ExpansionRoadmap
+from tests.benchmarks.typeevalpy.runner import BenchmarkResults, InferenceResult
+
+
+def generate_summary_section(results: BenchmarkResults) -> str:
+    """Generate summary table with key metrics."""
+
+    correct_count = len(results.correct)
+    incorrect_count = len(results.incorrect)
+    unsupported_count = len(results.unsupported)
+    out_of_scope_count = len(results.out_of_scope)
+    total = results.total
+
+    attempted = correct_count + incorrect_count
+    accuracy = (correct_count / attempted * 100) if attempted > 0 else 0
+
+    return f"""## Summary
+
+| Metric | Count | Percentage |
+|--------|-------|------------|
+| Total annotations | {total} | 100.0% |
+| ✅ Correct | {correct_count} | {correct_count / total * 100:.1f}% |
+| ❌ Incorrect | {incorrect_count} | {incorrect_count / total * 100:.1f}% |
+| ⚠️ Unsupported (variables) | {unsupported_count} | {unsupported_count / total * 100:.1f}% |
+| 🔵 Out of scope | {out_of_scope_count} | {out_of_scope_count / total * 100:.1f}% |
+
+**Current Coverage:** {correct_count} / {total} ({correct_count / total * 100:.1f}%)
+**Accuracy on Attempted:** {correct_count} / {attempted} ({accuracy:.1f}%)
+"""
+
+
+def generate_type_breakdown(results: BenchmarkResults) -> str:
+    """Generate breakdown by inferred type."""
+
+    # Group results by expected type
+    type_stats: dict[str, dict[str, int]] = defaultdict(lambda: {"correct": 0, "total": 0})
+
+    for result in results.correct:
+        typ = result.inferred_type
+        if typ is not None:
+            type_stats[typ]["correct"] += 1
+            type_stats[typ]["total"] += 1
+
+    for result in results.incorrect:
+        # Use expected type (since inference was wrong)
+        typ = result.case.expected_types[0]  # Use first expected type
+        type_stats[typ]["total"] += 1
+
+    if not type_stats:
+        return "## By Type\n\nNo type-specific data available.\n"
+
+    # Format as table
+    lines = [
+        "## By Type",
+        "",
+        "| Type | Correct | Total | Accuracy |",
+        "|------|---------|-------|----------|",
+    ]
+
+    for typ in sorted(type_stats.keys()):
+        stats = type_stats[typ]
+        accuracy = (stats["correct"] / stats["total"] * 100) if stats["total"] > 0 else 0
+        lines.append(f"| {typ} | {stats['correct']} | {stats['total']} | {accuracy:.1f}% |")
+
+    return "\n".join(lines)
+
+
+def generate_failure_examples(results: BenchmarkResults, max_examples: int = 10) -> str:
+    """Show examples of incorrect inferences."""
+
+    if not results.incorrect:
+        return ""
+
+    lines = ["## Incorrect Inferences", "", f"Showing up to {max_examples} examples:", ""]
+
+    for i, result in enumerate(results.incorrect[:max_examples], 1):
+        case = result.case
+        lines.append(
+            f"{i}. `{case.category}/{case.file_path.name}:{case.line_number}` - "
+            f"Variable `{case.variable_name}`: "
+            f"Expected `{', '.join(case.expected_types)}`, Got `{result.inferred_type}`"
+        )
+
+    if len(results.incorrect) > max_examples:
+        lines.append(f"\n... and {len(results.incorrect) - max_examples} more")
+
+    return "\n".join(lines)
+
+
+def generate_roadmap_section(roadmap: ExpansionRoadmap) -> str:
+    """Generate expansion roadmap as markdown."""
+
+    sections = ["## Expansion Roadmap", ""]
+
+    if roadmap.quick_wins:
+        sections.append("### 🚀 Quick Wins (1-2 hours each)")
+        sections.append("")
+        for i, pattern in enumerate(roadmap.quick_wins, 1):
+            sections.append(
+                f"{i}. **{pattern.pattern_name}** "
+                f"({pattern.count} cases, +{pattern.coverage_gain:.1f}% coverage)"
+            )
+            if pattern.examples:
+                sections.append("   ```python")
+                for ex in pattern.examples:
+                    sections.append(f"   {ex}")
+                sections.append("   ```")
+            sections.append("")
+
+    if roadmap.medium_effort:
+        sections.append("### 🔧 Medium Effort (4-8 hours each)")
+        sections.append("")
+        for i, pattern in enumerate(roadmap.medium_effort, 1):
+            sections.append(
+                f"{i}. **{pattern.pattern_name}** "
+                f"({pattern.count} cases, +{pattern.coverage_gain:.1f}% coverage)"
+            )
+            if pattern.examples:
+                sections.append("   ```python")
+                for ex in pattern.examples:
+                    sections.append(f"   {ex}")
+                sections.append("   ```")
+            sections.append("")
+
+    if roadmap.long_term:
+        sections.append("### 🎯 Long Term (1+ weeks each)")
+        sections.append("")
+        for i, pattern in enumerate(roadmap.long_term, 1):
+            sections.append(
+                f"{i}. **{pattern.pattern_name}** "
+                f"({pattern.count} cases, +{pattern.coverage_gain:.1f}% coverage)"
+            )
+        sections.append("")
+
+    return "\n".join(sections)
+
+
+def generate_report(results: BenchmarkResults, roadmap: ExpansionRoadmap) -> str:
+    """Generate complete markdown report."""
+
+    sections = [
+        "# TypeEvalPy Benchmark Results",
+        "",
+        generate_summary_section(results),
+        "",
+        generate_type_breakdown(results),
+        "",
+        generate_failure_examples(results),
+        "",
+        generate_roadmap_section(roadmap),
+    ]
+
+    return "\n".join(sections)
+
+
+def export_json(results: BenchmarkResults, output_path: Path) -> None:
+    """Export detailed results as JSON."""
+
+    def result_to_dict(r: InferenceResult) -> dict[str, object]:
+        return {
+            "file": str(r.case.file_path),
+            "line": r.case.line_number,
+            "variable": r.case.variable_name,
+            "expected": r.case.expected_types,
+            "inferred": r.inferred_type,
+            "status": r.status.value,
+            "reason": r.reason,
+            "category": r.case.category,
+        }
+
+    data = {
+        "summary": {
+            "total": results.total,
+            "correct": len(results.correct),
+            "incorrect": len(results.incorrect),
+            "unsupported": len(results.unsupported),
+            "out_of_scope": len(results.out_of_scope),
+        },
+        "correct": [result_to_dict(r) for r in results.correct],
+        "incorrect": [result_to_dict(r) for r in results.incorrect],
+        "unsupported": [result_to_dict(r) for r in results.unsupported],
+        "out_of_scope": [result_to_dict(r) for r in results.out_of_scope],
+    }
+
+    output_path.write_text(json.dumps(data, indent=2))
+    print(f"Exported detailed results to {output_path}")

@@ -41,6 +41,8 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html",
 ]
+# Exclude benchmark data from test collection
+norecursedirs = ["tests/benchmarks/data"]
 
 [tool.ruff]
 line-length = 100
@@ -80,6 +82,9 @@ warn_unused_ignores = true
 warn_no_return = true
 check_untyped_defs = true
 strict_equality = true
+exclude = [
+    "^tests/benchmarks/data/",
+]
 
 [[tool.mypy.overrides]]
 module = "tests.*"
