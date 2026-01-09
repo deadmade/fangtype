@@ -6,7 +6,13 @@ authors = [
     { name = "deadmade" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pygls>=2.0.0",
+    "libcst>=1.8.0",
+]
+
+[project.scripts]
+auto-type-server = "auto_type.server:main"
 
 [project.optional-dependencies]
 dev = [
