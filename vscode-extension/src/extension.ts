@@ -10,22 +10,22 @@ let client: LanguageClient;
 
 /**
  * Convert LSP WorkspaceEdit JSON format to VSCode WorkspaceEdit object.
- * 
+ *
  * The LSP server returns WorkspaceEdit as plain JSON which must be converted
  * to VSCode's WorkspaceEdit class before calling workspace.applyEdit().
- * 
+ *
  * @param lspEdit - Plain object with LSP WorkspaceEdit structure
  * @returns VSCode WorkspaceEdit object
  */
 function lspWorkspaceEditToVscode(lspEdit: any): WorkspaceEdit {
     const vscodeEdit = new WorkspaceEdit();
-    
+
     if (lspEdit.changes) {
         // Iterate over each file URI in the changes map
         for (const uriString in lspEdit.changes) {
             const textEdits = lspEdit.changes[uriString];
             const docUri = Uri.parse(uriString);
-            
+
             // Convert each LSP TextEdit to VSCode TextEdit
             const vscodeTextEdits = textEdits.map((lspTextEdit: any) => {
                 const range = new Range(
@@ -40,12 +40,12 @@ function lspWorkspaceEditToVscode(lspEdit: any): WorkspaceEdit {
                 );
                 return new TextEdit(range, lspTextEdit.newText);
             });
-            
+
             // Set all edits for this document URI
             vscodeEdit.set(docUri, vscodeTextEdits);
         }
     }
-    
+
     return vscodeEdit;
 }
 
@@ -175,7 +175,7 @@ async function insertTypeAtCursor(editor: TextEditor): Promise<void> {
             // Convert LSP WorkspaceEdit JSON to VSCode format
             const vscodeEdit = lspWorkspaceEditToVscode(result.edits);
             const success = await workspace.applyEdit(vscodeEdit);
-            
+
             if (success) {
                 window.showInformationMessage(`Inserted type annotation: ${variableName}: ${inferredType}`);
             } else {
@@ -216,7 +216,7 @@ async function insertAllTypesInFile(): Promise<void> {
         // Show preview dialog
         const willInsert = preview.will_insert || [];
         const willSkip = preview.will_skip || [];
-        
+
         const previewMessage = [
             `Will insert ${willInsert.length} type annotation(s):`,
             ...willInsert.slice(0, 10).map((item: any) => `  • ${item.variable}: ${item.type}`),
@@ -245,7 +245,7 @@ async function insertAllTypesInFile(): Promise<void> {
             // Convert LSP WorkspaceEdit JSON to VSCode format
             const vscodeEdit = lspWorkspaceEditToVscode(result.edits);
             const success = await workspace.applyEdit(vscodeEdit);
-            
+
             if (success) {
                 window.showInformationMessage(result.message || `Inserted ${result.inserted_count} type annotations`);
             } else {
@@ -279,7 +279,7 @@ async function removeTypeAtCursor(editor: TextEditor): Promise<void> {
         // Simple check: does the line contain ": " before "="?
         const line = document.lineAt(wordRange.start.line);
         const lineText = line.text;
-        
+
         if (!lineText.includes(':') || !lineText.includes('=')) {
             window.showWarningMessage(`Variable '${variableName}' has no type annotation to remove`);
             return;
@@ -294,7 +294,7 @@ async function removeTypeAtCursor(editor: TextEditor): Promise<void> {
         if (result.success && result.edits) {
             const vscodeEdit = lspWorkspaceEditToVscode(result.edits);
             const success = await workspace.applyEdit(vscodeEdit);
-            
+
             if (success) {
                 window.showInformationMessage(`Removed type annotation from '${variableName}'`);
             } else {
@@ -335,10 +335,10 @@ async function removeAllTypesInFile(): Promise<void> {
         // Show preview dialog
         const willRemove = preview.will_remove || [];
         const willSkip = preview.will_skip || [];
-        
+
         const previewMessage = [
             `Will remove ${willRemove.length} type annotation(s):`,
-            ...willRemove.slice(0, 10).map((item: any) => 
+            ...willRemove.slice(0, 10).map((item: any) =>
                 `  • ${item.variable}: ${item.type} (line ${item.line})`
             ),
             willRemove.length > 10 ? `  ... and ${willRemove.length - 10} more` : '',
@@ -365,7 +365,7 @@ async function removeAllTypesInFile(): Promise<void> {
         if (result.success && result.edits) {
             const vscodeEdit = lspWorkspaceEditToVscode(result.edits);
             const success = await workspace.applyEdit(vscodeEdit);
-            
+
             if (success) {
                 window.showInformationMessage(result.message || `Removed ${result.removed_count} type annotations`);
             } else {

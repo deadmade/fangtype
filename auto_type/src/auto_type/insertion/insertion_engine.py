@@ -12,21 +12,20 @@ import logging
 from typing import Any
 
 import libcst as cst
-from libcst import matchers as m
 
 logger = logging.getLogger(__name__)
 
 
 class TypeAnnotationTransformer(cst.CSTTransformer):
     """LibCST transformer that adds type annotations to variables.
-    
+
     This transformer visits AnnAssign and Assign nodes and adds type
     annotations where specified in the types_to_insert mapping.
     """
 
     def __init__(self, types_to_insert: dict[str, str]) -> None:
         """Initialize the transformer.
-        
+
         Args:
             types_to_insert: Mapping of variable names to type strings
                            e.g., {"x": "int", "name": "str"}
@@ -39,21 +38,21 @@ class TypeAnnotationTransformer(cst.CSTTransformer):
         self, original_node: cst.Assign, updated_node: cst.Assign
     ) -> cst.Assign | cst.AnnAssign:
         """Transform simple assignments to annotated assignments.
-        
+
         Converts:
             x = 42
         To:
             x: int = 42
-            
+
         Only transforms if:
         1. The assignment target is a simple Name (not tuple/list unpacking)
         2. The variable name is in types_to_insert
         3. There's a value being assigned (not just a bare assignment)
-        
+
         Args:
             original_node: The original Assign node
             updated_node: The updated Assign node (from previous transforms)
-            
+
         Returns:
             Either the original Assign or a new AnnAssign with type annotation
         """
@@ -99,14 +98,14 @@ class TypeAnnotationTransformer(cst.CSTTransformer):
         self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign
     ) -> cst.AnnAssign:
         """Leave existing annotated assignments unchanged.
-        
+
         If a variable already has a type annotation, we respect the user's
         choice and don't modify it. This is a key design principle.
-        
+
         Args:
             original_node: The original AnnAssign node
             updated_node: The updated AnnAssign node
-            
+
         Returns:
             The unchanged AnnAssign node
         """
@@ -125,14 +124,14 @@ class TypeAnnotationTransformer(cst.CSTTransformer):
 
 class TypeReplacementTransformer(cst.CSTTransformer):
     """LibCST transformer that replaces type annotations for variables.
-    
+
     This transformer visits AnnAssign nodes and replaces their type
     annotations with new ones.
     """
 
     def __init__(self, types_to_replace: dict[str, str]) -> None:
         """Initialize the transformer.
-        
+
         Args:
             types_to_replace: Mapping of variable names to new type strings
                              e.g., {"x": "int"} will replace x's annotation with int
@@ -145,18 +144,18 @@ class TypeReplacementTransformer(cst.CSTTransformer):
         self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign
     ) -> cst.AnnAssign:
         """Replace type annotations for specified variables.
-        
+
         Converts:
             x: str = 42  →  x: int = 42
-            
+
         Only transforms if:
         1. The assignment target is a simple Name (not attributes/subscripts)
         2. The variable name is in types_to_replace
-        
+
         Args:
             original_node: The original AnnAssign node
             updated_node: The updated AnnAssign node (from previous transforms)
-            
+
         Returns:
             AnnAssign with replaced type annotation, or unchanged if not in types_to_replace
         """
@@ -191,14 +190,14 @@ class TypeReplacementTransformer(cst.CSTTransformer):
 
 class TypeRemovalTransformer(cst.CSTTransformer):
     """LibCST transformer that removes type annotations from variables.
-    
+
     This transformer visits AnnAssign nodes and converts them back to
     regular Assign nodes, effectively removing the type annotations.
     """
 
     def __init__(self, variables_to_remove: set[str] | None = None) -> None:
         """Initialize the transformer.
-        
+
         Args:
             variables_to_remove: Set of variable names to remove annotations from.
                                 If None, remove ALL type annotations.
@@ -211,21 +210,21 @@ class TypeRemovalTransformer(cst.CSTTransformer):
         self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign
     ) -> cst.AnnAssign | cst.Assign:
         """Transform annotated assignments to regular assignments.
-        
+
         Converts:
             x: int = 42  →  x = 42
         Skips:
             x: int       (no value, leave as-is per design decision)
-            
+
         Only transforms if:
         1. The assignment target is a simple Name (not attributes/subscripts)
         2. The variable name is in variables_to_remove (or variables_to_remove is None)
         3. There's a value being assigned (skip variable declarations without values)
-        
+
         Args:
             original_node: The original AnnAssign node
             updated_node: The updated AnnAssign node (from previous transforms)
-            
+
         Returns:
             Either a new Assign (annotation removed) or unchanged AnnAssign
         """
@@ -258,16 +257,115 @@ class TypeRemovalTransformer(cst.CSTTransformer):
         return assign
 
 
+class FunctionSignatureTransformer(cst.CSTTransformer):
+    """LibCST transformer that adds type annotations to function signatures.
+
+    This transformer visits FunctionDef nodes and adds parameter type
+    annotations and return type annotations where specified.
+    """
+
+    def __init__(self, function_annotations: dict[str, dict[str, Any]]) -> None:
+        """Initialize the transformer.
+
+        Args:
+            function_annotations: Dict mapping function names to their annotations.
+                Format: {
+                    "func_name": {
+                        "params": {"param1": "int", "param2": "str"},
+                        "return": "bool"
+                    }
+                }
+        """
+        self.function_annotations = function_annotations
+        self.modified_count = 0
+        self.logger = logging.getLogger(__name__)
+
+    def leave_FunctionDef(
+        self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef
+    ) -> cst.FunctionDef:
+        """Add type annotations to function signature.
+
+        Args:
+            original_node: Original function definition node
+            updated_node: Updated function definition node
+
+        Returns:
+            Modified function definition with type annotations
+        """
+        func_name = original_node.name.value
+
+        # Check if we have annotations for this function
+        if func_name not in self.function_annotations:
+            return updated_node
+
+        annotations = self.function_annotations[func_name]
+        params_to_annotate = annotations.get("params", {})
+        return_type = annotations.get("return")
+
+        modified = False
+
+        # Add parameter annotations
+        if params_to_annotate:
+            new_params = []
+            for param in updated_node.params.params:
+                param_name = param.name.value
+
+                # Skip if already annotated or not in our list
+                if param.annotation is not None or param_name not in params_to_annotate:
+                    new_params.append(param)
+                    continue
+
+                # Add type annotation
+                type_str = params_to_annotate[param_name]
+                try:
+                    type_annotation = cst.parse_expression(type_str)
+                    new_param = param.with_changes(
+                        annotation=cst.Annotation(annotation=type_annotation)
+                    )
+                    new_params.append(new_param)
+                    modified = True
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to parse type '{type_str}' for param {param_name}: {e}"
+                    )
+                    new_params.append(param)
+
+            if modified:
+                updated_node = updated_node.with_changes(
+                    params=updated_node.params.with_changes(params=new_params)
+                )
+
+        # Add return type annotation
+        if return_type and updated_node.returns is None:
+            try:
+                return_annotation = cst.parse_expression(return_type)
+                updated_node = updated_node.with_changes(
+                    returns=cst.Annotation(annotation=return_annotation)
+                )
+                modified = True
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to parse return type '{return_type}' for {func_name}: {e}"
+                )
+
+        if modified:
+            self.modified_count += 1
+
+        return updated_node
+
+    leave_AsyncFunctionDef = leave_FunctionDef  # Handle async functions the same way
+
+
 class InsertionEngine:
     """Engine for inserting and removing type annotations in Python source code.
-    
+
     This class provides high-level methods to:
     1. Insert a type annotation for a single variable
     2. Insert type annotations for all variables in a file
     3. Remove a type annotation from a single variable
     4. Remove type annotations from variables in a file
     5. Preview what changes would be made (insertions or removals)
-    
+
     The engine uses LibCST to preserve code formatting and comments.
     """
 
@@ -279,17 +377,17 @@ class InsertionEngine:
         self, source: str, variable_name: str, type_annotation: str
     ) -> tuple[str, bool]:
         """Insert a type annotation for a single variable.
-        
+
         Args:
             source: The Python source code
             variable_name: Name of the variable to annotate
             type_annotation: The type string (e.g., "int", "list[str]")
-            
+
         Returns:
             Tuple of (modified_source, success)
             - modified_source: The source with type annotation inserted
             - success: True if insertion was successful, False otherwise
-            
+
         Example:
             >>> engine = InsertionEngine()
             >>> source = "x = 42\\n"
@@ -313,9 +411,7 @@ class InsertionEngine:
             modified_source = modified_tree.code
 
             if transformer.inserted_count > 0:
-                self.logger.info(
-                    f"Successfully inserted type annotation for '{variable_name}'"
-                )
+                self.logger.info(f"Successfully inserted type annotation for '{variable_name}'")
                 return modified_source, True
             else:
                 self.logger.warning(
@@ -332,14 +428,14 @@ class InsertionEngine:
         self, source: str, types_map: dict[str, str], skip_annotated: bool = True
     ) -> tuple[str, dict[str, Any]]:
         """Insert type annotations for multiple variables in one pass.
-        
+
         Args:
             source: The Python source code
             types_map: Mapping of variable names to type strings
                       e.g., {"x": "int", "name": "str", "items": "list[str]"}
             skip_annotated: If True, skip variables that already have annotations
                            (default: True, respects user's explicit choices)
-            
+
         Returns:
             Tuple of (modified_source, result_info)
             - modified_source: The source with all type annotations inserted
@@ -348,7 +444,7 @@ class InsertionEngine:
                 - "inserted_count": int (number of annotations inserted)
                 - "skipped": list[str] (variables skipped)
                 - "failed": list[str] (variables that failed)
-                
+
         Example:
             >>> engine = InsertionEngine()
             >>> source = "x = 42\\nname = 'hello'\\n"
@@ -415,11 +511,11 @@ class InsertionEngine:
         self, tree: cst.Module, types_map: dict[str, str]
     ) -> dict[str, str]:
         """Filter out variables that already have type annotations.
-        
+
         Args:
             tree: The parsed LibCST module
             types_map: The original mapping of variables to types
-            
+
         Returns:
             Filtered mapping excluding already-annotated variables
         """
@@ -437,9 +533,7 @@ class InsertionEngine:
 
         # Filter out annotated variables
         filtered = {
-            var: type_str
-            for var, type_str in types_map.items()
-            if var not in annotated_vars
+            var: type_str for var, type_str in types_map.items() if var not in annotated_vars
         }
 
         if len(filtered) < len(types_map):
@@ -448,21 +542,19 @@ class InsertionEngine:
 
         return filtered
 
-    def preview_insertions(
-        self, source: str, types_map: dict[str, str]
-    ) -> dict[str, Any]:
+    def preview_insertions(self, source: str, types_map: dict[str, str]) -> dict[str, Any]:
         """Preview what type annotations would be inserted without modifying source.
-        
+
         Args:
             source: The Python source code
             types_map: Mapping of variable names to type strings
-            
+
         Returns:
             Dict with preview information:
             - "will_insert": list[dict] with {"variable": str, "type": str}
             - "will_skip": list[dict] with {"variable": str, "reason": str}
             - "total_changes": int
-            
+
         Example:
             >>> engine = InsertionEngine()
             >>> source = "x = 42\\ny: str = 'hello'\\n"
@@ -495,16 +587,15 @@ class InsertionEngine:
 
             for var_name, type_str in types_map.items():
                 if var_name in annotated_vars:
-                    will_skip.append({
-                        "variable": var_name,
-                        "type": type_str,
-                        "reason": "Already has type annotation"
-                    })
+                    will_skip.append(
+                        {
+                            "variable": var_name,
+                            "type": type_str,
+                            "reason": "Already has type annotation",
+                        }
+                    )
                 else:
-                    will_insert.append({
-                        "variable": var_name,
-                        "type": type_str
-                    })
+                    will_insert.append({"variable": var_name, "type": type_str})
 
             return {
                 "will_insert": will_insert,
@@ -523,21 +614,19 @@ class InsertionEngine:
                 "error": str(e),
             }
 
-    def replace_type(
-        self, source: str, variable_name: str, new_type: str
-    ) -> tuple[str, bool]:
+    def replace_type(self, source: str, variable_name: str, new_type: str) -> tuple[str, bool]:
         """Replace the type annotation for a variable.
-        
+
         Args:
             source: The Python source code
             variable_name: Name of the variable to replace annotation for
             new_type: The new type string (e.g., "int", "list[str]")
-            
+
         Returns:
             Tuple of (modified_source, success)
             - modified_source: The source with type annotation replaced
             - success: True if replacement was successful, False otherwise
-            
+
         Example:
             >>> engine = InsertionEngine()
             >>> source = "x: str = 42\\n"
@@ -545,9 +634,7 @@ class InsertionEngine:
             >>> print(modified)
             x: int = 42
         """
-        self.logger.info(
-            f"Replacing type annotation for '{variable_name}' with '{new_type}'"
-        )
+        self.logger.info(f"Replacing type annotation for '{variable_name}' with '{new_type}'")
 
         try:
             # Parse source code into CST
@@ -563,9 +650,7 @@ class InsertionEngine:
             modified_source = modified_tree.code
 
             if transformer.replaced_count > 0:
-                self.logger.info(
-                    f"Successfully replaced type annotation for '{variable_name}'"
-                )
+                self.logger.info(f"Successfully replaced type annotation for '{variable_name}'")
                 return modified_source, True
             else:
                 self.logger.warning(
@@ -578,20 +663,18 @@ class InsertionEngine:
             self.logger.error(f"Error replacing type annotation: {e}", exc_info=True)
             return source, False
 
-    def remove_type(
-        self, source: str, variable_name: str
-    ) -> tuple[str, bool]:
+    def remove_type(self, source: str, variable_name: str) -> tuple[str, bool]:
         """Remove type annotation from a single variable.
-        
+
         Args:
             source: The Python source code
             variable_name: Name of the variable to remove annotation from
-            
+
         Returns:
             Tuple of (modified_source, success)
             - modified_source: The source with type annotation removed
             - success: True if removal was successful, False otherwise
-            
+
         Example:
             >>> engine = InsertionEngine()
             >>> source = "x: int = 42\\n"
@@ -615,14 +698,11 @@ class InsertionEngine:
             modified_source = modified_tree.code
 
             if transformer.removed_count > 0:
-                self.logger.info(
-                    f"Successfully removed type annotation for '{variable_name}'"
-                )
+                self.logger.info(f"Successfully removed type annotation for '{variable_name}'")
                 return modified_source, True
             else:
                 self.logger.warning(
-                    f"No removal made for '{variable_name}' - "
-                    "variable not found or not annotated"
+                    f"No removal made for '{variable_name}' - variable not found or not annotated"
                 )
                 return source, False
 
@@ -631,13 +711,10 @@ class InsertionEngine:
             return source, False
 
     def remove_types_bulk(
-        self, 
-        source: str, 
-        variables: list[str] | None = None,
-        include_functions: bool = False
+        self, source: str, variables: list[str] | None = None, include_functions: bool = False
     ) -> tuple[str, dict[str, Any]]:
         """Remove type annotations from multiple variables.
-        
+
         Args:
             source: The Python source code
             variables: List of variable names to remove annotations from,
@@ -645,7 +722,7 @@ class InsertionEngine:
             include_functions: If True and variables=None, also remove function
                               annotations. Currently not implemented.
                               (default: False, only remove variable annotations)
-            
+
         Returns:
             Tuple of (modified_source, result_info)
             - modified_source: The source with type annotations removed
@@ -655,7 +732,7 @@ class InsertionEngine:
                 - "not_found": list[str] (requested but not annotated/found)
                 - "skipped": list[str] (variables without values)
                 - "total_requested": int
-                
+
         Example:
             >>> engine = InsertionEngine()
             >>> source = "x: int = 42\\ny: str = 'hi'\\n"
@@ -684,14 +761,12 @@ class InsertionEngine:
                 # Remove only specified variables
                 variables_to_remove = set(variables)
                 # Track which requested variables were not found or not annotated
-                not_found = [
-                    v for v in variables 
-                    if v not in annotated_info
-                ]
+                not_found = [v for v in variables if v not in annotated_info]
 
             # Track variables that will be skipped (no value)
             skipped = [
-                var for var, info in annotated_info.items()
+                var
+                for var, info in annotated_info.items()
                 if var in variables_to_remove and not info["has_value"]
             ]
 
@@ -732,14 +807,12 @@ class InsertionEngine:
                 "error": str(e),
             }
 
-    def _find_annotated_variables(
-        self, tree: cst.Module
-    ) -> dict[str, dict[str, Any]]:
+    def _find_annotated_variables(self, tree: cst.Module) -> dict[str, dict[str, Any]]:
         """Find all variables with type annotations in a module.
-        
+
         Args:
             tree: The parsed LibCST module
-            
+
         Returns:
             Mapping of variable names to info dicts:
             {
@@ -762,7 +835,7 @@ class InsertionEngine:
                     # Get type as string
                     type_str = node.annotation.annotation
                     type_code = cst.Module([]).code_for_node(type_str)
-                    
+
                     annotated_vars[var_name] = {
                         "type": type_code,
                         "has_value": node.value is not None,
@@ -776,18 +849,14 @@ class InsertionEngine:
         self.logger.debug(f"Found {len(annotated_vars)} annotated variables")
         return annotated_vars
 
-    def preview_removals(
-        self, 
-        source: str, 
-        variables: list[str] | None = None
-    ) -> dict[str, Any]:
+    def preview_removals(self, source: str, variables: list[str] | None = None) -> dict[str, Any]:
         """Preview what type annotations would be removed without modifying source.
-        
+
         Args:
             source: The Python source code
             variables: List of variable names to preview removal for,
                       or None to preview removal of ALL annotations
-            
+
         Returns:
             Dict with preview information:
             - "success": bool
@@ -795,7 +864,7 @@ class InsertionEngine:
             - "not_found": list[str] (requested but not annotated)
             - "will_skip": list[dict] with {"variable": str, "reason": str}
             - "total_changes": int
-            
+
         Example:
             >>> engine = InsertionEngine()
             >>> source = "x: int = 42\\ny: str\\n"
@@ -824,34 +893,42 @@ class InsertionEngine:
                 # Preview removal of all annotations
                 for var_name, info in annotated_info.items():
                     if info["has_value"]:
-                        will_remove.append({
-                            "variable": var_name,
-                            "type": info["type"],
-                            "line": info["line"],
-                        })
+                        will_remove.append(
+                            {
+                                "variable": var_name,
+                                "type": info["type"],
+                                "line": info["line"],
+                            }
+                        )
                     else:
-                        will_skip.append({
-                            "variable": var_name,
-                            "type": info["type"],
-                            "reason": "No value (declaration only)",
-                        })
+                        will_skip.append(
+                            {
+                                "variable": var_name,
+                                "type": info["type"],
+                                "reason": "No value (declaration only)",
+                            }
+                        )
             else:
                 # Preview removal of specific variables
                 for var_name in variables:
                     if var_name in annotated_info:
                         info = annotated_info[var_name]
                         if info["has_value"]:
-                            will_remove.append({
-                                "variable": var_name,
-                                "type": info["type"],
-                                "line": info["line"],
-                            })
+                            will_remove.append(
+                                {
+                                    "variable": var_name,
+                                    "type": info["type"],
+                                    "line": info["line"],
+                                }
+                            )
                         else:
-                            will_skip.append({
-                                "variable": var_name,
-                                "type": info["type"],
-                                "reason": "No value (declaration only)",
-                            })
+                            will_skip.append(
+                                {
+                                    "variable": var_name,
+                                    "type": info["type"],
+                                    "reason": "No value (declaration only)",
+                                }
+                            )
                     else:
                         not_found.append(var_name)
 
@@ -874,3 +951,59 @@ class InsertionEngine:
                 "error": str(e),
             }
 
+    def insert_function_signatures(
+        self,
+        source: str,
+        function_annotations: dict[str, dict[str, Any]],
+        skip_annotated: bool = True,
+    ) -> tuple[str, dict[str, Any]]:
+        """Insert type annotations for function signatures.
+
+        Args:
+            source: The Python source code
+            function_annotations: Dict mapping function names to their annotations.
+                Format: {
+                    "func_name": {
+                        "params": {"param1": "int", "param2": "str"},
+                        "return": "bool"
+                    }
+                }
+            skip_annotated: If True, skip parameters/functions already annotated
+
+        Returns:
+            Tuple of (modified_source, result_info)
+            result_info contains:
+                - "success": bool
+                - "modified_count": int (number of functions modified)
+                - "skipped": list[str] (function names skipped)
+        """
+        self.logger.info(f"Inserting signatures for {len(function_annotations)} functions")
+
+        try:
+            # Parse source
+            tree = cst.parse_module(source)
+
+            # Apply transformation
+            transformer = FunctionSignatureTransformer(function_annotations)
+            modified_tree = tree.visit(transformer)
+
+            # Convert back to source code
+            modified_source = modified_tree.code
+
+            result_info = {
+                "success": True,
+                "modified_count": transformer.modified_count,
+                "skipped": [],
+            }
+
+            self.logger.info(f"Modified {transformer.modified_count} function signatures")
+            return modified_source, result_info
+
+        except Exception as e:
+            self.logger.error(f"Error inserting function signatures: {e}", exc_info=True)
+            return source, {
+                "success": False,
+                "modified_count": 0,
+                "skipped": [],
+                "error": str(e),
+            }

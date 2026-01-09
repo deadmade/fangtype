@@ -93,54 +93,6 @@ def generate_failure_examples(results: BenchmarkResults, max_examples: int = 10)
     return "\n".join(lines)
 
 
-def generate_roadmap_section(roadmap: ExpansionRoadmap) -> str:
-    """Generate expansion roadmap as markdown."""
-
-    sections = ["## Expansion Roadmap", ""]
-
-    if roadmap.quick_wins:
-        sections.append("### 🚀 Quick Wins (1-2 hours each)")
-        sections.append("")
-        for i, pattern in enumerate(roadmap.quick_wins, 1):
-            sections.append(
-                f"{i}. **{pattern.pattern_name}** "
-                f"({pattern.count} cases, +{pattern.coverage_gain:.1f}% coverage)"
-            )
-            if pattern.examples:
-                sections.append("   ```python")
-                for ex in pattern.examples:
-                    sections.append(f"   {ex}")
-                sections.append("   ```")
-            sections.append("")
-
-    if roadmap.medium_effort:
-        sections.append("### 🔧 Medium Effort (4-8 hours each)")
-        sections.append("")
-        for i, pattern in enumerate(roadmap.medium_effort, 1):
-            sections.append(
-                f"{i}. **{pattern.pattern_name}** "
-                f"({pattern.count} cases, +{pattern.coverage_gain:.1f}% coverage)"
-            )
-            if pattern.examples:
-                sections.append("   ```python")
-                for ex in pattern.examples:
-                    sections.append(f"   {ex}")
-                sections.append("   ```")
-            sections.append("")
-
-    if roadmap.long_term:
-        sections.append("### 🎯 Long Term (1+ weeks each)")
-        sections.append("")
-        for i, pattern in enumerate(roadmap.long_term, 1):
-            sections.append(
-                f"{i}. **{pattern.pattern_name}** "
-                f"({pattern.count} cases, +{pattern.coverage_gain:.1f}% coverage)"
-            )
-        sections.append("")
-
-    return "\n".join(sections)
-
-
 def generate_report(results: BenchmarkResults, roadmap: ExpansionRoadmap) -> str:
     """Generate complete markdown report."""
 
@@ -153,7 +105,6 @@ def generate_report(results: BenchmarkResults, roadmap: ExpansionRoadmap) -> str
         "",
         generate_failure_examples(results),
         "",
-        generate_roadmap_section(roadmap),
     ]
 
     return "\n".join(sections)
