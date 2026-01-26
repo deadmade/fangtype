@@ -1,12 +1,9 @@
 """Type inference module for auto-type."""
 
-from auto_type.inference.contextual_inference import ContextualInferenceEngine
-from auto_type.inference.type_propagation import TypePropagationEngine
-from auto_type.inference.unified_inference import InferenceResult, UnifiedInferenceEngine
+from auto_type.inference.inference_result import InferenceResult
+from auto_type.inference.jedi_engine import JediInferenceEngine
 
 __all__: list[str] = [
-    "ContextualInferenceEngine",
     "InferenceResult",
-    "TypePropagationEngine",
-    "UnifiedInferenceEngine",
+    "JediInferenceEngine",
 ]

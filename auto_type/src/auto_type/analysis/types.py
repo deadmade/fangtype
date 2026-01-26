@@ -229,17 +229,6 @@ class ScopeTree:
     root: Scope
     scopes_by_id: dict[str, Scope] = field(default_factory=dict)
 
-    def get_scope(self, scope_id: str) -> Scope | None:
-        """Get scope by ID.
-
-        Args:
-            scope_id: Unique scope identifier
-
-        Returns:
-            Scope if found, None otherwise
-        """
-        return self.scopes_by_id.get(scope_id)
-
     def add_scope(self, scope: Scope) -> None:
         """Register a scope in the tree.
 
@@ -260,6 +249,98 @@ class ScopeTree:
             if scope.scope_type in (ScopeType.FUNCTION, ScopeType.LAMBDA)
         ]
 
+    def find_scope_for_line(self, line: int) -> Scope:
+        """Find the innermost scope that contains a given line number.
+
+        Args:
+            line: 0-based line number
+
+        Returns:
+            The most specific scope containing this line (defaults to root)
+        """
+        best_scope = self.root
+
+        for scope in self.scopes_by_id.values():
+            if scope.scope_type == ScopeType.MODULE:
+                continue
+
+            # Check if this scope's AST node contains the line
+            ast_node = scope.ast_node
+            if hasattr(ast_node, "lineno") and hasattr(ast_node, "end_lineno"):
+                # Convert to 0-based
+                start_line = ast_node.lineno - 1
+                end_line = ast_node.end_lineno - 1 if ast_node.end_lineno else start_line
+
+                # This scope contains the line - check if it's more specific
+                if start_line <= line <= end_line and (
+                    best_scope.scope_type == ScopeType.MODULE
+                    or (
+                        hasattr(best_scope.ast_node, "lineno")
+                        and ast_node.lineno >= best_scope.ast_node.lineno
+                    )
+                ):
+                    best_scope = scope
+
+        return best_scope
+
+    def get_variable_type_at_line(self, var_name: str, line: int) -> TypeInfo | None:
+        """Get the type of a variable at a specific line number across all scopes.
+
+        This method finds the appropriate scope for the given line and queries
+        the variable type there, properly handling nested function scopes.
+
+        Args:
+            var_name: Variable name to look up
+            line: 0-based line number
+
+        Returns:
+            TypeInfo for the variable at that line, or None if not found
+        """
+        # Find the scope that contains this line
+        scope = self.find_scope_for_line(line)
+
+        # Query the variable type in that scope
+        return scope.get_variable_type_at_line(var_name, line)
+
+    def get_function_scope_by_qualified_name(self, qualified_name: str) -> Scope | None:
+        """Find function scope by qualified name (e.g., 'MyClass.method', 'A.B.method').
+
+        Args:
+            qualified_name: Function name, possibly qualified (e.g., 'func', 'Class.method')
+
+        Returns:
+            The matching function scope, or None if not found
+        """
+        parts = qualified_name.split(".")
+
+        if len(parts) == 1:
+            # Simple function name - return first match
+            for scope in self.get_all_function_scopes():
+                if scope.name == parts[0]:
+                    return scope
+            return None
+
+        # Qualified name: Class.method or A.B.method
+        method_name = parts[-1]
+        class_path = parts[:-1]
+
+        for scope in self.get_all_function_scopes():
+            if scope.name == method_name:
+                # Verify parent hierarchy matches the class path
+                parent = scope.parent
+                match = True
+                for class_name in reversed(class_path):
+                    if parent and parent.name == class_name:
+                        parent = parent.parent
+                    else:
+                        match = False
+                        break
+
+                if match:
+                    return scope
+
+        return None
+
 
 @dataclass
 class FunctionNode:
@@ -276,21 +357,6 @@ class FunctionNode:
     scope: Scope
     calls: list[str] = field(default_factory=list)
     called_by: list[str] = field(default_factory=list)
-
-    @property
-    def name(self) -> str:
-        """Get the function name."""
-        return self.scope.name
-
-    @property
-    def qualified_name(self) -> str:
-        """Get the fully qualified function name."""
-        return self.scope.get_qualified_name()
-
-    @property
-    def scope_id(self) -> str:
-        """Get the scope ID."""
-        return self.scope.scope_id
 
 
 @dataclass
@@ -341,27 +407,6 @@ class CallGraph:
             if caller_id not in self.nodes[callee_id].called_by:
                 self.nodes[callee_id].called_by.append(caller_id)
 
-    def get_leaf_functions(self) -> list[str]:
-        """Get scope IDs of functions that don't call other user-defined functions.
-
-        These are the "bottom" of the call graph and should be analyzed first.
-
-        Returns:
-            List of scope IDs for functions with no outgoing calls
-        """
-        return [node.scope.scope_id for node in self.nodes.values() if len(node.calls) == 0]
-
-    def topological_levels(self) -> list[list[str]]:
-        """Group function scope IDs into levels for bottom-up processing.
-
-        Alias for get_topological_levels() that returns scope IDs instead of nodes.
-
-        Returns:
-            List of levels, where each level is a list of scope IDs
-        """
-        node_levels = self.get_topological_levels()
-        return [[node.scope.scope_id for node in level] for level in node_levels]
-
     def get_topological_levels(self) -> list[list[FunctionNode]]:
         """Group functions into levels for bottom-up processing.
 
@@ -400,44 +445,6 @@ class CallGraph:
 
             if current_level:
                 levels.append(current_level)
-                processed.update(node.scope_id for node in current_level)
+                processed.update(node.scope.scope_id for node in current_level)
 
         return levels
-
-    def get_function(self, scope_id: str) -> FunctionNode | None:
-        """Get function node by scope ID.
-
-        Args:
-            scope_id: Scope ID to look up
-
-        Returns:
-            FunctionNode if found, None otherwise
-        """
-        return self.nodes.get(scope_id)
-
-    def has_cycles(self) -> bool:
-        """Check if the call graph contains cycles (recursive functions).
-
-        Returns:
-            True if there are any cycles in the call graph
-        """
-        visited: set[str] = set()
-        rec_stack: set[str] = set()
-
-        def has_cycle_from(node_id: str) -> bool:
-            visited.add(node_id)
-            rec_stack.add(node_id)
-
-            node = self.nodes.get(node_id)
-            if node:
-                for callee_id in node.calls:
-                    if callee_id not in visited:
-                        if has_cycle_from(callee_id):
-                            return True
-                    elif callee_id in rec_stack:
-                        return True
-
-            rec_stack.remove(node_id)
-            return False
-
-        return any(node_id not in visited and has_cycle_from(node_id) for node_id in self.nodes)

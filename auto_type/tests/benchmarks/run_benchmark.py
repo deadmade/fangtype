@@ -8,7 +8,6 @@ from pathlib import Path
 # Add project root to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from auto_type.inference import UnifiedInferenceEngine
 from tests.benchmarks.typeevalpy.analyzer import (
     analyze_unsupported_patterns,
     create_expansion_roadmap,
@@ -78,10 +77,9 @@ Examples:
 
         print()
 
-        # Run inference
+        # Run inference (uses DI container internally)
         print("Running inference...")
-        engine = UnifiedInferenceEngine()
-        results = run_benchmark(cases, engine, show_progress=not args.no_progress)
+        results = run_benchmark(cases, show_progress=not args.no_progress)
         print()
 
         # Analyze patterns

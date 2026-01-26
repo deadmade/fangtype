@@ -1,0 +1,44 @@
+# Development files
+.vscode/**
+.vscode-test/**
+src/**
+*.ts
+!*.d.ts
+tsconfig.json
+.gitignore
+.eslintrc*
+*.map
+
+# Git
+.git/**
+
+# Build scripts and config
+scripts/**
+noxfile.py
+requirements.txt
+
+# Documentation (keep README)
+*.md
+!README.md
+
+# Test files
+**/*.test.ts
+**/__tests__/**
+
+# Node modules (vsce will bundle dependencies automatically)
+# But we want to be explicit about what to include
+node_modules/.bin/**
+node_modules/**/test/**
+node_modules/**/tests/**
+node_modules/**/*.md
+node_modules/**/*.ts
+!node_modules/**/*.d.ts
+node_modules/**/LICENSE*
+node_modules/**/CHANGELOG*
+node_modules/**/README*
+
+# Python cache files in bundled directory
+bundled/**/__pycache__/**
+bundled/**/*.pyc
+bundled/**/*.pyo
+bundled/**/py.typed
