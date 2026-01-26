@@ -1,13 +1,11 @@
 """Analysis module for scope-aware type inference.
 
-This module provides infrastructure for analyzing Python code structure:
-- Scope analysis: Building scope trees for modules, functions, classes
-- Call graph construction: Tracking function call relationships
-- Type propagation: Bottom-up type inference through call graphs
+This module provides data structures for analyzing Python code structure:
+- Type metadata (TypeInfo, TypeSource)
+- Scope representation (Scope, ScopeType, ScopeTree)
+- Call graph structures (FunctionNode, CallGraph)
 """
 
-from auto_type.analysis.call_graph_builder import CallGraphBuilder
-from auto_type.analysis.scope_analyzer import ScopeAnalyzer
 from auto_type.analysis.types import (
     CallGraph,
     FunctionNode,
@@ -20,10 +18,8 @@ from auto_type.analysis.types import (
 
 __all__: list[str] = [
     "CallGraph",
-    "CallGraphBuilder",
     "FunctionNode",
     "Scope",
-    "ScopeAnalyzer",
     "ScopeTree",
     "ScopeType",
     "TypeInfo",

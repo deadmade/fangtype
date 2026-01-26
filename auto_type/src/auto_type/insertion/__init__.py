@@ -1,9 +1,29 @@
-"""Type annotation insertion module.
+"""Unified insertion engine package.
 
-This module provides functionality to insert inferred type annotations
-into Python source code while preserving formatting.
+This package provides a clean, strategy-based approach to type annotation insertion
+that eliminates code duplication and ensures consistency between single and bulk operations.
 """
 
-from auto_type.insertion.insertion_engine import InsertionEngine
+from .engine import UnifiedInsertionEngine
+from .strategies import create_default_strategies
+from .types import (
+    CodeLocation,
+    InsertionContext,
+    InsertionPlan,
+    InsertionResult,
+    InsertionTarget,
+    TargetType,
+    TransformationType,
+)
 
-__all__ = ["InsertionEngine"]
+__all__ = [
+    "CodeLocation",
+    "InsertionContext",
+    "InsertionPlan",
+    "InsertionResult",
+    "InsertionTarget",
+    "TargetType",
+    "TransformationType",
+    "UnifiedInsertionEngine",
+    "create_default_strategies",
+]

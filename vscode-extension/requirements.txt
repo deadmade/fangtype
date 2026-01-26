@@ -1,0 +1,9 @@
+# Auto-type server dependencies
+# Generated from auto_type/pyproject.toml
+
+# Core dependencies
+pygls>=2.0.0
+libcst>=1.8.0
+mypy>=1.15.0
+jedi>=0.19.2
+injector>=0.24.0

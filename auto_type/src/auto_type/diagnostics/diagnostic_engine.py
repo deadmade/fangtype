@@ -2,6 +2,7 @@
 
 import logging
 
+from injector import inject
 from lsprotocol import types
 
 from auto_type.validation import MypyDiagnostic, MypyTypeValidator
@@ -14,8 +15,11 @@ class DiagnosticEngine:
 
     This engine runs mypy on the entire file and converts all mypy errors,
     warnings, and notes into LSP diagnostics that can be displayed in the editor.
+
+    All methods are async to work with async validators.
     """
 
+    @inject
     def __init__(self, mypy_validator: MypyTypeValidator) -> None:
         """Initialize the diagnostic engine.
 
@@ -24,7 +28,7 @@ class DiagnosticEngine:
         """
         self.mypy_validator = mypy_validator
 
-    def generate_diagnostics(self, source: str, uri: str) -> list[types.Diagnostic]:
+    async def generate_diagnostics(self, source: str, uri: str) -> list[types.Diagnostic]:
         """Run mypy and convert all errors to LSP diagnostics.
 
         Args:
@@ -35,8 +39,8 @@ class DiagnosticEngine:
             List of LSP Diagnostic objects for each mypy issue
         """
         try:
-            # Run mypy validation on the entire file
-            mypy_diagnostics = self.mypy_validator.validate_file_full(source)
+            # Run mypy validation on the entire file (async)
+            mypy_diagnostics = await self.mypy_validator.validate_file_full(source)
 
             # Convert to LSP diagnostics
             lsp_diagnostics = []

@@ -1,5 +1,7 @@
 """Mypy-based type validator for checking type annotation correctness."""
 
+import asyncio
+import keyword
 import logging
 import re
 from dataclasses import dataclass
@@ -8,6 +10,36 @@ from typing import Any
 from mypy import api
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_var_name(name: str) -> str:
+    """Sanitize a variable name for use in test code.
+
+    Converts dotted paths, scope IDs, and other strings into valid
+    Python identifiers by replacing non-alphanumeric characters with
+    underscores and handling reserved keywords.
+
+    Args:
+        name: String to sanitize
+
+    Returns:
+        A valid Python identifier
+    """
+    # Replace non-alphanumeric characters with underscores
+    sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+
+    # Handle reserved keywords - check each part after splitting by underscore
+    parts = sanitized.split("_")
+    sanitized_parts = []
+    for part in parts:
+        if not part:
+            continue
+        if keyword.iskeyword(part) or keyword.issoftkeyword(part):
+            sanitized_parts.append(f"{part}_")
+        else:
+            sanitized_parts.append(part)
+
+    return "_".join(sanitized_parts)
 
 
 @dataclass
@@ -36,6 +68,9 @@ class MypyTypeValidator:
 
     Unlike the lightweight validator, this catches all issues that mypy
     would flag, ensuring we only suggest types that are truly valid.
+
+    All public methods are async and use asyncio.to_thread() to run
+    the blocking mypy subprocess calls without blocking the event loop.
     """
 
     def __init__(self) -> None:
@@ -53,7 +88,7 @@ class MypyTypeValidator:
             "--allow-incomplete-defs",  # Allow partial annotations
         ]
 
-    def validate_file_full(self, source: str) -> list[MypyDiagnostic]:
+    async def validate_file_full(self, source: str, timeout: float = 30.0) -> list[MypyDiagnostic]:
         """Run mypy on entire file and return ALL errors/warnings.
 
         Unlike validate_bulk which tests individual types, this validates
@@ -63,10 +98,22 @@ class MypyTypeValidator:
 
         Args:
             source: Complete Python source code
+            timeout: Maximum time to wait for mypy (default 30s)
 
         Returns:
-            List of structured mypy diagnostics (empty list if no errors)
+            List of structured mypy diagnostics (empty list if no errors or timeout)
         """
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._validate_file_full_sync, source),
+                timeout=timeout,
+            )
+        except TimeoutError:
+            logger.warning(f"Mypy file validation timed out after {timeout}s")
+            return []
+
+    def _validate_file_full_sync(self, source: str) -> list[MypyDiagnostic]:
+        """Synchronous implementation of validate_file_full."""
         # Run mypy on the source code
         result = api.run([*self._mypy_flags, "-c", source])
         stdout, stderr, exit_code = result
@@ -132,7 +179,7 @@ class MypyTypeValidator:
 
         return diagnostics
 
-    def validate(self, type_str: str, source: str) -> bool:
+    async def validate(self, type_str: str, source: str) -> bool:
         """Validate a single type string using mypy.
 
         Creates a test variable with the type annotation and validates it
@@ -146,6 +193,10 @@ class MypyTypeValidator:
         Returns:
             True if type is valid according to mypy, False otherwise
         """
+        return await asyncio.to_thread(self._validate_sync, type_str, source)
+
+    def _validate_sync(self, type_str: str, source: str) -> bool:
+        """Synchronous implementation of validate."""
         # Special case: "Unknown" is not a valid type
         if type_str == "Unknown":
             return False
@@ -158,7 +209,7 @@ class MypyTypeValidator:
         result = api.run([*self._mypy_flags, "-c", test_code])
 
         # result is a tuple: (stdout, stderr, exit_code)
-        stdout, stderr, exit_code = result
+        stdout, _stderr, exit_code = result
 
         # Exit code 0 means mypy found no errors
         if exit_code == 0:
@@ -190,43 +241,88 @@ class MypyTypeValidator:
         # This means the type itself is valid
         return True
 
-    def validate_bulk(self, types_map: dict[str, str], source: str) -> dict[str, str]:
+    async def validate_insertion(
+        self, source: str, variable_name: str, type_annotation: str
+    ) -> tuple[bool, str]:
+        """Validate a type annotation before insertion.
+
+        Args:
+            source: Source code where the type will be inserted
+            variable_name: Name of the variable being annotated
+            type_annotation: Type annotation to validate
+
+        Returns:
+            Tuple of (is_valid, error_message). error_message is empty if valid.
+        """
+        is_valid = await self.validate(type_annotation, source)
+        if is_valid:
+            return True, ""
+        return False, f"Type '{type_annotation}' is not valid for variable '{variable_name}'"
+
+    async def validate_bulk(
+        self, types_map: dict[Any, str], source: str, timeout: float = 30.0
+    ) -> dict[Any, str]:
         """Validate multiple types at once (more efficient than individual checks).
 
         Validates all types in a single mypy run. This is much more efficient
         than calling validate() for each type individually.
 
         Args:
-            types_map: Dict of {var_name: type_str} to validate
+            types_map: Dict of {key: type_str} to validate. Key can be str or tuple.
             source: Full source code for context
+            timeout: Maximum time to wait for mypy (default 30s)
 
         Returns:
-            Dict of {var_name: type_str} containing only valid types
+            Dict of {key: type_str} containing only valid types
         """
         if not types_map:
             return {}
 
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._validate_bulk_sync, types_map, source),
+                timeout=timeout,
+            )
+        except TimeoutError:
+            logger.warning(f"Mypy bulk validation timed out after {timeout}s")
+            return {}
+
+    def _validate_bulk_sync(self, types_map: dict[Any, str], source: str) -> dict[Any, str]:
+        """Synchronous implementation of validate_bulk."""
         # Create test code with all type annotations
         # Track which line corresponds to which variable
         # When mypy processes code with -c, line numbers start at 1
-        test_lines = [source]
-        if source and not source.endswith("\n"):
-            test_lines.append("\n")
+
+        test_lines = []
+        if source:
+            test_lines.append(source)
+            if not source.endswith("\n"):
+                test_lines.append("\n")
+
+        # Calculate exactly how many lines the source (and potential newline) takes
+        source_line_count = "".join(test_lines).count("\n")
+
         test_lines.append("# Auto-type test annotations\n")
+        # Comment line is source_line_count + 1
 
-        # Calculate starting line number for test annotations
-        # Count actual lines in source (split by newline)
-        source_line_count = len(source.split("\n")) if source else 1
-        # +1 for the comment line
-        start_line = source_line_count + 1
+        var_to_line: dict[Any, int] = {}
+        # First variable will be on source_line_count + 2
+        current_line = source_line_count + 2
 
-        var_to_line: dict[str, int] = {}
-        current_line = start_line
+        for key, type_str in types_map.items():
+            if isinstance(key, tuple) and len(key) == 2 and isinstance(key[1], str):
+                # Handle (line, name) keys
+                var_name = key[1]
+            else:
+                var_name = str(key)
 
-        for var_name, type_str in types_map.items():
-            # Use unique names to avoid conflicts
-            test_lines.append(f"_auto_type_test_{var_name}: {type_str}\n")
-            var_to_line[var_name] = current_line
+            sanitized_name = _sanitize_var_name(var_name)
+
+            # Use unique suffix to allow same variable name multiple times
+            unique_suffix = f"_{current_line}"
+            test_lines.append(f"_auto_type_test_{sanitized_name}{unique_suffix}: {type_str}\n")
+
+            var_to_line[key] = current_line
             current_line += 1
 
         test_code = "".join(test_lines)
@@ -240,7 +336,7 @@ class MypyTypeValidator:
             return types_map.copy()
 
         # Parse errors to determine which types are invalid
-        validated_types: dict[str, str] = {}
+        validated_types: dict[Any, str] = {}
 
         if not stdout:
             # No error output but non-zero exit - assume all invalid
@@ -265,102 +361,11 @@ class MypyTypeValidator:
                     continue
 
         # Return only types that didn't have errors on their lines
-        for var_name, type_str in types_map.items():
-            var_line = var_to_line[var_name]
+        for key, type_str in types_map.items():
+            var_line = var_to_line[key]
             if var_line not in invalid_lines:
-                validated_types[var_name] = type_str
+                validated_types[key] = type_str
             else:
-                logger.debug(f"Filtered out invalid type: {var_name}: {type_str}")
+                logger.debug(f"Filtered out invalid type: {key}: {type_str}")
 
         return validated_types
-
-    def validate_insertion(self, source: str, var_name: str, type_str: str) -> tuple[bool, str]:
-        """Validate that inserting a type annotation would be mypy-clean.
-
-        Actually inserts the type annotation into the source and validates
-        the complete file. This is the most thorough validation - it ensures
-        the type annotation not only is valid, but also matches the actual value.
-
-        Args:
-            source: Original source code
-            var_name: Variable name to annotate
-            type_str: Type annotation to insert
-
-        Returns:
-            Tuple of (is_valid, error_message)
-            - is_valid: True if insertion is valid
-            - error_message: Empty string if valid, error details if invalid
-        """
-        # Use InsertionEngine to create the modified source
-        # Import here to avoid circular dependency
-        from auto_type.insertion import InsertionEngine
-
-        insertion_engine = InsertionEngine()
-
-        # Try to insert the type
-        modified_source, success = insertion_engine.insert_type(source, var_name, type_str)
-
-        if not success:
-            return False, f"Could not insert type for variable '{var_name}'"
-
-        # Validate the modified source with mypy
-        result = api.run([*self._mypy_flags, "-c", modified_source])
-        stdout, stderr, exit_code = result
-
-        if exit_code == 0:
-            return True, ""
-
-        # Extract relevant error message
-        error_msg = stdout.strip() if stdout else "Unknown mypy error"
-
-        # Try to extract just the first error line for brevity
-        if "\n" in error_msg:
-            first_error = error_msg.split("\n")[0]
-            # Remove file/line prefix from -c output
-            if ": error:" in first_error:
-                first_error = first_error.split(": error:", 1)[1].strip()
-            error_msg = first_error
-
-        logger.debug(f"Type insertion validation failed: {error_msg}")
-        return False, error_msg
-
-    def validate_function_signatures(
-        self, functions: dict[str, dict[str, Any]], source: str
-    ) -> dict[str, dict[str, Any]]:
-        """Validate function signatures (parameters and return types).
-
-        Args:
-            functions: Dict of {func_name: {"params": {...}, "return": "..."}}
-            source: Full source code for context
-
-        Returns:
-            Dict with same structure, containing only valid function signatures
-        """
-        if not functions:
-            return {}
-
-        validated_functions: dict[str, dict[str, Any]] = {}
-
-        # Validate each function's signature
-        for func_name, func_info in functions.items():
-            validated_params: dict[str, str] = {}
-            validated_return: str | None = None
-
-            # Validate parameter types
-            if func_info.get("params"):
-                validated_params = self.validate_bulk(func_info["params"], source)
-
-            # Validate return type
-            if func_info.get("return"):
-                return_type = func_info["return"]
-                if self.validate(return_type, source):
-                    validated_return = return_type
-
-            # Include function if it has any validated types
-            if validated_params or validated_return:
-                validated_functions[func_name] = {
-                    "params": validated_params,
-                    "return": validated_return,
-                }
-
-        return validated_functions

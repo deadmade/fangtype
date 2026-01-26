@@ -1,12 +1,61 @@
 import * as path from 'path';
-import { workspace, ExtensionContext, commands, window, TextEditor, Position, Range, WorkspaceEdit, Uri, TextEdit } from 'vscode';
+import * as fs from 'fs';
+import { workspace, ExtensionContext, commands, window, TextEditor, Position, Range, WorkspaceEdit, Uri, TextEdit, InlayHint } from 'vscode';
 import {
     LanguageClient,
     LanguageClientOptions,
     ServerOptions,
+    Middleware,
 } from 'vscode-languageclient/node';
+import { PythonExtension } from '@vscode/python-extension';
 
 let client: LanguageClient;
+let outputChannel: import('vscode').OutputChannel;
+
+// Inlay hint cache: Map<documentUri, { version: number, hints: InlayHint[] }>
+// Caches full-file hints to avoid redundant LSP requests on scroll events
+const inlayHintCache = new Map<string, { version: number; hints: InlayHint[] }>();
+
+/**
+ * Middleware to cache inlay hints by document version.
+ * The server returns hints for the entire file, so we can cache the full response
+ * and filter client-side for the visible range.
+ */
+const middleware: Middleware = {
+    provideInlayHints: async (document, range, token, next) => {
+        const uri = document.uri.toString();
+        const cached = inlayHintCache.get(uri);
+
+        // Cache hit: same document version
+        if (cached && cached.version === document.version) {
+            // Filter cached hints to requested range
+            return cached.hints.filter(hint =>
+                hint.position.line >= range.start.line &&
+                hint.position.line <= range.end.line
+            );
+        }
+
+        // Cache miss: request full file range from server
+        const fullRange = new Range(0, 0, document.lineCount, 0);
+        const hints = await next(document, fullRange, token);
+
+        if (hints && !token.isCancellationRequested) {
+            // Cache the full response
+            inlayHintCache.set(uri, {
+                version: document.version,
+                hints: hints as InlayHint[]
+            });
+
+            // Return only hints in requested range
+            return (hints as InlayHint[]).filter(hint =>
+                hint.position.line >= range.start.line &&
+                hint.position.line <= range.end.line
+            );
+        }
+
+        return hints;
+    }
+};
 
 /**
  * Convert LSP WorkspaceEdit JSON format to VSCode WorkspaceEdit object.
@@ -49,24 +98,133 @@ function lspWorkspaceEditToVscode(lspEdit: any): WorkspaceEdit {
     return vscodeEdit;
 }
 
-export function activate(context: ExtensionContext) {
-    // Get configuration
-    const config = workspace.getConfiguration('autoType');
-    const serverCommand = config.get<string>('serverCommand', 'auto-type-server');
-    const serverArgs = config.get<string[]>('serverArgs', []);
+/**
+ * Get the path to the bundled LSP server script.
+ *
+ * @param context - Extension context
+ * @returns Path to bundled/tool/lsp_server.py
+ */
+function getBundledServerPath(context: ExtensionContext): string {
+    return path.join(context.extensionPath, 'bundled', 'tool', 'lsp_server.py');
+}
 
-    // Server options - start the auto-type server
-    const serverOptions: ServerOptions = {
-        command: serverCommand,
-        args: serverArgs,
+/**
+ * Check if the bundled server exists.
+ *
+ * @param context - Extension context
+ * @returns true if bundled server is available
+ */
+function hasBundledServer(context: ExtensionContext): boolean {
+    const serverPath = getBundledServerPath(context);
+    const autoTypePath = path.join(context.extensionPath, 'bundled', 'tool', 'auto_type');
+    return fs.existsSync(serverPath) && fs.existsSync(autoTypePath);
+}
+
+/**
+ * Get the Python interpreter to use for running the bundled server.
+ *
+ * Priority:
+ * 1. Custom interpreter from autoType.interpreter setting
+ * 2. Active interpreter from ms-python.python extension
+ * 3. 'python3' as fallback
+ *
+ * @returns Python interpreter command
+ */
+async function getPythonInterpreter(): Promise<string[]> {
+    // Try to get interpreter from ms-python.python extension
+    try {
+        const pythonApi = await PythonExtension.api();
+        await pythonApi.ready;
+
+        // Get the active environment for the first workspace folder
+        const workspaceFolder = workspace.workspaceFolders?.[0];
+        if (workspaceFolder) {
+            const environment = pythonApi.environments.getActiveEnvironmentPath(workspaceFolder.uri);
+            if (environment) {
+                const resolvedEnv = await pythonApi.environments.resolveEnvironment(environment);
+                if (resolvedEnv?.executable?.uri) {
+                    const pythonPath = resolvedEnv.executable.uri.fsPath;
+                    outputChannel.appendLine(`Using Python from ms-python: ${pythonPath}`);
+                    return [pythonPath];
+                }
+            }
+        }
+
+        // Fallback: try to get any known environment
+        const knownEnvs = pythonApi.environments.known;
+        if (knownEnvs.length > 0) {
+            const firstEnv = await pythonApi.environments.resolveEnvironment(knownEnvs[0]);
+            if (firstEnv?.executable?.uri) {
+                const pythonPath = firstEnv.executable.uri.fsPath;
+                outputChannel.appendLine(`Using first known Python environment: ${pythonPath}`);
+                return [pythonPath];
+            }
+        }
+    } catch (error) {
+        outputChannel.appendLine(`Could not get Python from ms-python extension: ${error}`);
+    }
+
+    // Final fallback
+    outputChannel.appendLine('Using fallback interpreter: python3');
+    return ['python3'];
+}
+
+/**
+ * Get server options based on configuration and available server.
+ *
+ * @param context - Extension context
+ * @returns ServerOptions for the language client
+ */
+async function getServerOptions(context: ExtensionContext): Promise<ServerOptions> {
+    // Priority 1: Bundled server (if server exists)
+    if (hasBundledServer(context)) {
+        const pythonInterpreter = await getPythonInterpreter();
+        const serverScript = getBundledServerPath(context);
+        outputChannel.appendLine(`Using bundled server: ${pythonInterpreter.join(' ')} ${serverScript}`);
+        return {
+            command: pythonInterpreter[0],
+            args: [...pythonInterpreter.slice(1), serverScript],
+        };
+    }
+
+    // Fallback: try bundled with python3
+    outputChannel.appendLine('Falling back to bundled server with python3');
+    return {
+        command: 'python3',
+        args: [getBundledServerPath(context)],
     };
+}
+
+export async function activate(context: ExtensionContext) {
+    // Create output channel for logging
+    outputChannel = window.createOutputChannel('Auto Type Language Server');
+    context.subscriptions.push(outputChannel);
+
+    outputChannel.appendLine('Activating Auto Type extension...');
+
+    // Get server options
+    const serverOptions = await getServerOptions(context);
+
+    if ('command' in serverOptions) {
+        outputChannel.appendLine(`Server command: ${serverOptions.command}`);
+        if (serverOptions.args) {
+            outputChannel.appendLine(`Server args: ${serverOptions.args.join(' ')}`);
+        }
+    }
 
     // Client options - configure the language client
     const clientOptions: LanguageClientOptions = {
         documentSelector: [{ scheme: 'file', language: 'python' }],
         synchronize: {
             fileEvents: workspace.createFileSystemWatcher('**/*.py')
-        }
+        },
+        initializationOptions: {
+            validation: {
+                enableMypyValidation: true
+            }
+        },
+        middleware,
+        outputChannel,
     };
 
     // Create the language client
@@ -80,6 +238,8 @@ export function activate(context: ExtensionContext) {
     // Start the client and register commands when ready
     // Note: In vscode-languageclient v9+, start() returns a Promise
     client.start().then(() => {
+        outputChannel.appendLine('Language server started successfully');
+
         // Command: Insert type at cursor
         const insertTypeCommand = commands.registerTextEditorCommand(
             'autoType.insertTypeAtCursor',
@@ -112,12 +272,21 @@ export function activate(context: ExtensionContext) {
             }
         );
 
+        // Clear inlay hint cache when documents are closed
+        const cacheCleanup = workspace.onDidCloseTextDocument(doc => {
+            inlayHintCache.delete(doc.uri.toString());
+        });
+
         context.subscriptions.push(
             insertTypeCommand,
             insertAllTypesCommand,
             removeTypeCommand,
-            removeAllTypesCommand
+            removeAllTypesCommand,
+            cacheCleanup
         );
+    }).catch((error) => {
+        outputChannel.appendLine(`Failed to start language server: ${error}`);
+        window.showErrorMessage(`Auto Type: Failed to start language server. ${error}`);
     });
 }
 

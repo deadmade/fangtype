@@ -10,10 +10,53 @@ class AnnotationType(Enum):
     """Type of annotation in ground truth."""
 
     SIMPLE_VARIABLE = "simple_variable"  # x = 42
-    COMPLEX_VARIABLE = "complex_variable"  # obj.attr, list[0]
+    COMPLEX_VARIABLE = "complex_variable"  # obj.attr, list[0] (legacy, use specific types below)
+    SUBSCRIPT_ACCESS = "subscript_access"  # d['a'], list[0] - NOT annotatable inline
+    ATTRIBUTE_ACCESS = "attribute_access"  # self.width, obj.attr - NOT annotatable inline
+    ITERATION_VARIABLE = "iteration_variable"  # for i in range(...) - NOT annotatable inline
     FUNCTION_RETURN = "function_return"  # def f() -> int
     FUNCTION_PARAM = "function_param"  # def f(a: int)
     OTHER = "other"
+
+
+def is_subscript_access(var_name: str) -> bool:
+    """Check for subscript patterns: d['a'], list[0], data[0]['name'].
+
+    These cannot be annotated inline in Python.
+    """
+    return "[" in var_name
+
+
+def is_attribute_access(var_name: str) -> bool:
+    """Check for attribute access patterns: self.width, obj.attr.
+
+    These cannot be annotated inline in Python.
+    """
+    return "." in var_name
+
+
+def is_iteration_variable(source_code: str, var_name: str, line_number: int) -> bool:
+    """Check if variable is a loop iteration variable.
+
+    For loop variables like 'for i in range(10)' cannot be annotated inline.
+
+    Args:
+        source_code: The source code to check
+        var_name: Variable name to check
+        line_number: 1-indexed line number where variable is defined
+
+    Returns:
+        True if variable is a loop iteration variable
+    """
+    try:
+        lines = source_code.splitlines()
+        if line_number < 1 or line_number > len(lines):
+            return False
+        line = lines[line_number - 1].strip()
+        # Check for 'for var_name in ...' pattern
+        return line.startswith("for ") and f" {var_name} " in line.replace(",", " ")
+    except Exception:
+        return False
 
 
 @dataclass
@@ -52,18 +95,51 @@ def find_ground_truth_files(benchmark_dir: Path) -> list[Path]:
     return sorted(benchmark_dir.rglob("*_gt.json"))
 
 
-def categorize_annotation(ann: dict[str, object]) -> AnnotationType:
-    """Determine annotation type from JSON structure."""
+def categorize_annotation(ann: dict[str, object], source_code: str | None = None) -> AnnotationType:
+    """Determine annotation type from JSON structure.
+
+    Priority order:
+    1. parameter - function parameter annotation
+    2. variable - variable annotation (may have function context)
+       - subscript access: d['a'], list[0] - NOT annotatable inline
+       - attribute access: self.width, obj.attr - NOT annotatable inline
+       - iteration variable: for i in range(...) - NOT annotatable inline
+       - simple variable: x = 42
+    3. function - function return type annotation
+
+    Args:
+        ann: Annotation dictionary from ground truth JSON
+        source_code: Optional source code to check for iteration variables
+
+    Returns:
+        The appropriate AnnotationType for this annotation
+    """
     if "parameter" in ann:
         return AnnotationType.FUNCTION_PARAM
+    elif "variable" in ann:
+        # Variable annotations take priority over function context
+        # e.g., {"variable": "self.width", "function": "Rectangle.__init__"}
+        # is a variable annotation, not a function return annotation
+        var_name = str(ann["variable"])
+
+        # Check for subscript access first (d['a'], list[0])
+        if is_subscript_access(var_name):
+            return AnnotationType.SUBSCRIPT_ACCESS
+
+        # Check for attribute access (self.width, obj.attr)
+        if is_attribute_access(var_name):
+            return AnnotationType.ATTRIBUTE_ACCESS
+
+        # Check for iteration variable (for i in range(...))
+        if source_code is not None:
+            line_num_raw = ann.get("line_number", 0)
+            line_number = int(line_num_raw) if isinstance(line_num_raw, int | str) else 0
+            if is_iteration_variable(source_code, var_name, line_number):
+                return AnnotationType.ITERATION_VARIABLE
+
+        return AnnotationType.SIMPLE_VARIABLE
     elif "function" in ann:
         return AnnotationType.FUNCTION_RETURN
-    elif "variable" in ann:
-        var_name = ann["variable"]
-        # Complex variables: obj.attr, items[0], etc.
-        if "[" in var_name or "." in var_name:  # type: ignore[operator]
-            return AnnotationType.COMPLEX_VARIABLE
-        return AnnotationType.SIMPLE_VARIABLE
     return AnnotationType.OTHER
 
 
@@ -108,7 +184,7 @@ def load_benchmark_case(gt_file: Path, annotation: dict[str, object]) -> Benchma
         parameter_name=annotation.get("parameter"),  # type: ignore[arg-type]
         expected_types=annotation["type"],  # type: ignore[arg-type]
         category=category,
-        annotation_type=categorize_annotation(annotation),
+        annotation_type=categorize_annotation(annotation, source_code),
     )
 
 
