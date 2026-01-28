@@ -99,12 +99,23 @@ function lspWorkspaceEditToVscode(lspEdit: any): WorkspaceEdit {
 }
 
 /**
- * Get the path to the bundled LSP server script.
+ * Get the path to the bundled LSP server binary.
+ *
+ * @param context - Extension context
+ * @returns Path to bundled/tool/auto-type-server (or .exe)
+ */
+function getBundledBinaryPath(context: ExtensionContext): string {
+    const binaryName = process.platform === 'win32' ? 'auto-type-server.exe' : 'auto-type-server';
+    return path.join(context.extensionPath, 'bundled', 'tool', binaryName);
+}
+
+/**
+ * Get the path to the bundled LSP server script (fallback).
  *
  * @param context - Extension context
  * @returns Path to bundled/tool/lsp_server.py
  */
-function getBundledServerPath(context: ExtensionContext): string {
+function getBundledScriptPath(context: ExtensionContext): string {
     return path.join(context.extensionPath, 'bundled', 'tool', 'lsp_server.py');
 }
 
@@ -115,9 +126,14 @@ function getBundledServerPath(context: ExtensionContext): string {
  * @returns true if bundled server is available
  */
 function hasBundledServer(context: ExtensionContext): boolean {
-    const serverPath = getBundledServerPath(context);
+    // Check for binary first
+    if (fs.existsSync(getBundledBinaryPath(context))) {
+        return true;
+    }
+    // Check for script fallback
+    const scriptPath = getBundledScriptPath(context);
     const autoTypePath = path.join(context.extensionPath, 'bundled', 'tool', 'auto_type');
-    return fs.existsSync(serverPath) && fs.existsSync(autoTypePath);
+    return fs.existsSync(scriptPath) && fs.existsSync(autoTypePath);
 }
 
 /**
@@ -176,22 +192,32 @@ async function getPythonInterpreter(): Promise<string[]> {
  * @returns ServerOptions for the language client
  */
 async function getServerOptions(context: ExtensionContext): Promise<ServerOptions> {
-    // Priority 1: Bundled server (if server exists)
-    if (hasBundledServer(context)) {
-        const pythonInterpreter = await getPythonInterpreter();
-        const serverScript = getBundledServerPath(context);
-        outputChannel.appendLine(`Using bundled server: ${pythonInterpreter.join(' ')} ${serverScript}`);
+    // Priority 1: Bundled Binary
+    const binaryPath = getBundledBinaryPath(context);
+    if (fs.existsSync(binaryPath)) {
+        outputChannel.appendLine(`Using bundled binary: ${binaryPath}`);
         return {
-            command: pythonInterpreter[0],
-            args: [...pythonInterpreter.slice(1), serverScript],
+            command: binaryPath,
+            args: [],
         };
     }
 
-    // Fallback: try bundled with python3
+    // Priority 2: Bundled Script (if exists)
+    const scriptPath = getBundledScriptPath(context);
+    if (fs.existsSync(scriptPath)) {
+        const pythonInterpreter = await getPythonInterpreter();
+        outputChannel.appendLine(`Using bundled script: ${pythonInterpreter.join(' ')} ${scriptPath}`);
+        return {
+            command: pythonInterpreter[0],
+            args: [...pythonInterpreter.slice(1), scriptPath],
+        };
+    }
+
+    // Fallback: try bundled script path with python3
     outputChannel.appendLine('Falling back to bundled server with python3');
     return {
         command: 'python3',
-        args: [getBundledServerPath(context)],
+        args: [getBundledScriptPath(context)],
     };
 }
 

@@ -9,9 +9,9 @@ requires-python = ">=3.12"
 dependencies = [
     "pygls>=2.0.0",
     "libcst>=1.8.0",
-    "mypy>=1.19.0",
+    "mypy>=1.17.0",
     "jedi>=0.19.2",
-    "injector>=0.24.0",
+    "injector>=0.22.0",
 ]
 
 [project.scripts]

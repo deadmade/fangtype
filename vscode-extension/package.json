@@ -56,9 +56,11 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile && npm run bundle-server",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run esbuild-base -- --production && npm run bundle-server",
+    "esbuild-base": "node esbuild.js",
+    "compile": "npm run esbuild-base",
+    "watch": "npm run esbuild-base -- --watch",
+    "check-types": "tsc --noEmit -p ./",
     "bundle-server": "python scripts/bundle_server.py",
     "package": "vsce package"
   },
@@ -70,6 +72,7 @@
     "@types/node": "^25.0.0",
     "@types/vscode": "^1.75.0",
     "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.27.2",
     "typescript": "^5.0.0"
   },
   "icon": "image.png"
