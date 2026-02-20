@@ -1,36 +1,47 @@
-# Development files
+# VSCode/Editor Configuration
 .vscode/**
 .vscode-test/**
+
+# Source Files (TypeScript - we bundle with esbuild)
 src/**
+test/**
 *.ts
 !*.d.ts
+
+# Build Configuration
 tsconfig.json
-.gitignore
-.eslintrc*
-*.map
+tsconfig.test.json
 esbuild.js
+eslint.config.mjs
 
-# Git
+# Test Files
+**/*.test.ts
+**/__tests__/**
+test-output.log
+.vscode-test.mjs*
+workspace/**
+test-results.xml
+
+# Build Output
+out/**
+*.map
+
+# Dependencies (bundled with esbuild)
+node_modules/**
+
+# Version Control
 .git/**
-
-# Build scripts and config
-scripts/**
-noxfile.py
-requirements.txt
+.gitignore
 
 # Documentation (keep README)
 *.md
 !README.md
 
-# Test files
-**/*.test.ts
-**/__tests__/**
+# Python-related (keep for dual-project)
+.mypy_cache
+noxfile.py
+requirements.txt
 
-# Node modules - Exclude entirely because we bundle with esbuild
-node_modules/**
-
-# Python cache files in bundled directory
-bundled/**/__pycache__/**
-bundled/**/*.pyc
-bundled/**/*.pyo
-bundled/**/py.typed
+# Misc
+.prettierignore
+scripts/**

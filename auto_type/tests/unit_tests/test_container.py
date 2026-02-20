@@ -1,7 +1,7 @@
 """Tests for the dependency injection container."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 from injector import Injector
 
@@ -11,7 +11,7 @@ from auto_type.container import (
     set_container,
 )
 from auto_type.diagnostics import DiagnosticEngine
-from auto_type.inference import JediInferenceEngine
+from auto_type.inference.jedi_engine import JediInferenceEngine
 from auto_type.insertion import UnifiedInsertionEngine
 from auto_type.protocols import (
     DiagnosticEngineProtocol,
@@ -19,7 +19,6 @@ from auto_type.protocols import (
     TypeValidatorProtocol,
 )
 from auto_type.utils.code_action_helper import CodeActionHelper
-from auto_type.utils.diagnostic_helper import DiagnosticHelper
 from auto_type.utils.inlay_hint_helper import InlayHintHelper
 from auto_type.validation import MypyTypeValidator
 
@@ -72,11 +71,9 @@ class TestContainerWiring:
         """Test that helper classes are correctly wired."""
         container = get_container()
 
-        # DiagnosticHelper
-        diag_helper = container.get(DiagnosticHelper)
-        assert isinstance(diag_helper, DiagnosticHelper)
-        assert hasattr(diag_helper, "diagnostic_engine")
-        assert diag_helper.diagnostic_engine is container.get(DiagnosticEngineProtocol)
+        diagnostic_engine = container.get(DiagnosticEngineProtocol)
+        assert isinstance(diagnostic_engine, DiagnosticEngine)
+        assert diagnostic_engine is container.get(DiagnosticEngine)
 
         # CodeActionHelper
         ca_helper = container.get(CodeActionHelper)
@@ -134,7 +131,7 @@ class TestContainerIntegration:
         engine = container.get(InferenceEngineProtocol)
 
         # Should be able to infer types
-        result = asyncio.run(engine.infer_types(sample_source))
+        result = engine.infer_types(sample_source)
         assert result is not None
         assert result.scope_tree is not None
 
@@ -144,11 +141,13 @@ class TestContainerIntegration:
         validator = container.get(TypeValidatorProtocol)
 
         # Should be able to validate types
-        is_valid = asyncio.run(validator.validate("int", sample_source))
-        assert is_valid is True
+        valid_result = asyncio.run(validator.validate_bulk({"_single": "int"}, sample_source))
+        assert valid_result["_single"].is_valid is True
 
-        is_invalid = asyncio.run(validator.validate("NonExistentType", sample_source))
-        assert is_invalid is False
+        invalid_result = asyncio.run(
+            validator.validate_bulk({"_single": "NonExistentType"}, sample_source)
+        )
+        assert invalid_result["_single"].is_valid is False
 
     def test_insertion_engine_works(self) -> None:
         """Test that insertion engine actually works."""
@@ -212,15 +211,21 @@ class TestContainerTestWorkflow:
 
     def test_mock_can_be_configured(self, test_container: Injector) -> None:
         """Test that mocked engines can be configured with custom return values."""
+        from typing import cast
+
         # Configure mock to return specific result
         inference_engine = test_container.get(InferenceEngineProtocol)
 
-        # Use AsyncMock for async method
-        inference_engine.infer_variable_types = AsyncMock(return_value={"x": "int"})
+        # Use MagicMock for sync method
+        mock_result = MagicMock()
+        mock_result.scope_tree = MagicMock()
+        mock_result.scope_tree.root = MagicMock()
+        mock_result.scope_tree.root.variables = {}
+        cast("MagicMock", inference_engine).infer_types = MagicMock(return_value=mock_result)
 
         # Should return configured value
-        result = asyncio.run(inference_engine.infer_variable_types("x = 42"))
-        assert result == {"x": "int"}
+        result = inference_engine.infer_types("x = 42")
+        assert result.scope_tree.root.variables == {}
 
     def test_global_container_with_mocks(self, test_container: Injector) -> None:
         """Test using mocked container as the global container."""

@@ -9,24 +9,24 @@ from typing import cast
 
 from injector import Binder, Injector, Module, provider, singleton
 
-from auto_type.analysis.name_collector import NameCollector
+from auto_type.analysis import NameCollector
 from auto_type.diagnostics import DiagnosticEngine
 from auto_type.inference import JediInferenceEngine
 from auto_type.insertion import UnifiedInsertionEngine
 from auto_type.protocols import (
-    DiagnosticEngineProtocol,
-    InferenceEngineProtocol,
-    TypeAnnotationWorkflowProtocol,
-    TypeValidatorProtocol,
+    DiagnosticEngineProtocol,  # noqa: TC001
+    InferenceEngineProtocol,  # noqa: TC001
+    TypeAnnotationWorkflowProtocol,  # noqa: TC001
+    TypeValidatorProtocol,  # noqa: TC001
 )
 from auto_type.utils.code_action_helper import CodeActionHelper
-from auto_type.utils.diagnostic_helper import DiagnosticHelper
 from auto_type.utils.inlay_hint_helper import InlayHintHelper
+from auto_type.utils.settings import Settings
 from auto_type.validation import MypyTypeValidator
 from auto_type.workflow import TypeAnnotationWorkflow
 
 # Global container instance
-_injector: "Injector | None" = None
+_injector: Injector | None = None
 _lock = threading.Lock()
 
 
@@ -35,12 +35,12 @@ class AutoTypeModule(Module):
 
     def configure(self, binder: Binder) -> None:
         """Bind concrete implementations as singletons."""
+        binder.bind(Settings, scope=singleton)
         binder.bind(JediInferenceEngine, scope=singleton)
         binder.bind(MypyTypeValidator, scope=singleton)
         binder.bind(UnifiedInsertionEngine, scope=singleton)
         binder.bind(DiagnosticEngine, scope=singleton)
         binder.bind(CodeActionHelper, scope=singleton)
-        binder.bind(DiagnosticHelper, scope=singleton)
         binder.bind(InlayHintHelper, scope=singleton)
         binder.bind(NameCollector, scope=singleton)
         binder.bind(TypeAnnotationWorkflow, scope=singleton)

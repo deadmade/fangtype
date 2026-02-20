@@ -12,7 +12,7 @@ from injector import Injector, Module, singleton
 
 from auto_type.container import reset_container
 from auto_type.diagnostics import DiagnosticEngine
-from auto_type.inference import JediInferenceEngine
+from auto_type.inference.jedi_engine import JediInferenceEngine
 from auto_type.insertion import UnifiedInsertionEngine
 from auto_type.protocols import (
     DiagnosticEngineProtocol,
@@ -45,7 +45,6 @@ def mock_inference_engine() -> MagicMock:
     }
 
     mock.infer_types.return_value = mock_result
-    mock.infer_variable_types.return_value = {}
     mock.infer_expression_type.return_value = None
 
     return mock
@@ -61,9 +60,7 @@ def mock_type_validator() -> MagicMock:
     mock = create_autospec(TypeValidatorProtocol, instance=True)
 
     # Set up default return values
-    mock.validate.return_value = True
     mock.validate_bulk.return_value = {}
-    mock.validate_insertion.return_value = (True, "")
     mock.validate_file_full.return_value = []
 
     return mock
@@ -112,6 +109,8 @@ def mock_diagnostic_engine() -> MagicMock:
 
     # Set up default return values
     mock.generate_diagnostics.return_value = []
+    mock.run_diagnostics.return_value = None
+    mock.schedule_diagnostics.return_value = None
 
     return mock
 

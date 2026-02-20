@@ -6,11 +6,19 @@ strategies must implement, along with utilities for strategy management.
 
 import logging
 from abc import abstractmethod
-from typing import Protocol
+from typing import Protocol, cast
 
 import libcst as cst
 
-from .types import InsertionContext, InsertionPlan, InsertionTarget
+from auto_type.inference.type_utils import sanitize_inferred_type
+
+from .types import (
+    InsertionContext,
+    InsertionPlan,
+    InsertionPlanMetadata,
+    InsertionTarget,
+    TransformationType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +109,29 @@ class BaseInsertionStrategy:
             self._logger.warning(f"Unexpected error validating type '{type_str}': {e}")
             return False
 
+    def sanitize_type_annotation(self, type_str: str) -> str:
+        """Sanitize and validate type annotation syntax.
+
+        Args:
+            type_str: Type annotation string to sanitize and validate
+
+        Returns:
+            A syntactically valid type annotation string
+
+        Raises:
+            ValueError: If no valid syntax can be produced
+        """
+        raw_type = type_str.strip()
+        if self.validate_type_syntax(raw_type):
+            return raw_type
+
+        sanitized = sanitize_inferred_type(raw_type).strip()
+        if sanitized != raw_type and self.validate_type_syntax(sanitized):
+            self._logger.debug("Sanitized invalid type '%s' -> '%s'", raw_type, sanitized)
+            return sanitized
+
+        raise ValueError(f"Invalid type annotation syntax: {type_str}")
+
     def _create_plan(
         self,
         target: InsertionTarget,
@@ -119,19 +150,17 @@ class BaseInsertionStrategy:
         Returns:
             InsertionPlan for this target
         """
-        from .types import TransformationType  # Avoid circular import
-
         try:
             transformation_type = TransformationType(transformation)
-        except ValueError:
-            raise ValueError(f"Unknown transformation type: {transformation}")
+        except ValueError as e:
+            raise ValueError(f"Unknown transformation type: {transformation}") from e
 
         return InsertionPlan(
             strategy_name=self.name,
             target=target,
             transformation=transformation_type,
             dependencies=dependencies or [],
-            metadata=dict(metadata),
+            metadata=cast(InsertionPlanMetadata, dict(metadata)),
         )
 
     def _log_planning(self, target: InsertionTarget, plan: InsertionPlan) -> None:

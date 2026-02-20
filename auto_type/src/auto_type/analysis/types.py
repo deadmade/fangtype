@@ -11,6 +11,15 @@ scope-aware type inference system:
 import ast
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+
+@runtime_checkable
+class HasLineRange(Protocol):
+    """Protocol for AST nodes that expose line range info."""
+
+    lineno: int
+    end_lineno: int | None
 
 
 class ScopeType(Enum):
@@ -83,8 +92,8 @@ class Scope:
     ast_node: ast.AST
 
     # Hierarchy
-    parent: "Scope | None" = None
-    children: list["Scope"] = field(default_factory=list)
+    parent: Scope | None = None
+    children: list[Scope] = field(default_factory=list)
 
     # Variables and types in this scope (flow-sensitive tracking)
     variable_history: dict[str, list[TypeInfo]] = field(default_factory=dict)
@@ -249,6 +258,14 @@ class ScopeTree:
             if scope.scope_type in (ScopeType.FUNCTION, ScopeType.LAMBDA)
         ]
 
+    def _node_line_range(self, node: ast.AST) -> tuple[int, int] | None:
+        """Return 0-based start/end line range for an AST node, if available."""
+        if not isinstance(node, HasLineRange):
+            return None
+        start_line = node.lineno - 1
+        end_line = node.end_lineno - 1 if node.end_lineno is not None else start_line
+        return start_line, end_line
+
     def find_scope_for_line(self, line: int) -> Scope:
         """Find the innermost scope that contains a given line number.
 
@@ -266,19 +283,16 @@ class ScopeTree:
 
             # Check if this scope's AST node contains the line
             ast_node = scope.ast_node
-            if hasattr(ast_node, "lineno") and hasattr(ast_node, "end_lineno"):
-                # Convert to 0-based
-                start_line = ast_node.lineno - 1
-                end_line = ast_node.end_lineno - 1 if ast_node.end_lineno else start_line
+            line_range = self._node_line_range(ast_node)
+            if line_range is None:
+                continue
+            start_line, end_line = line_range
 
-                # This scope contains the line - check if it's more specific
-                if start_line <= line <= end_line and (
-                    best_scope.scope_type == ScopeType.MODULE
-                    or (
-                        hasattr(best_scope.ast_node, "lineno")
-                        and ast_node.lineno >= best_scope.ast_node.lineno
-                    )
-                ):
+            # This scope contains the line - check if it's more specific
+            if start_line <= line <= end_line:
+                best_range = self._node_line_range(best_scope.ast_node)
+                best_start = best_range[0] if best_range is not None else -1
+                if best_scope.scope_type == ScopeType.MODULE or start_line >= best_start:
                     best_scope = scope
 
         return best_scope
@@ -338,6 +352,63 @@ class ScopeTree:
 
                 if match:
                     return scope
+
+        return None
+
+    def get_class_scope_for_function_scope(self, function_scope: Scope) -> Scope | None:
+        """Get the owning class scope for a function scope.
+
+        Args:
+            function_scope: Function scope to inspect
+
+        Returns:
+            The direct parent class scope if the function belongs to a class,
+            otherwise None.
+        """
+        if function_scope.scope_type != ScopeType.FUNCTION:
+            return None
+
+        parent = function_scope.parent
+        if parent and parent.scope_type == ScopeType.CLASS:
+            return parent
+        return None
+
+    def get_attribute_type_for_method_context(
+        self, function_scope: Scope, attr_name: str, line: int
+    ) -> TypeInfo | None:
+        """Resolve a ``self`` attribute type from method and class context.
+
+        Lookup order:
+        1. Method-local tracked attributes.
+        2. Owning class tracked attributes.
+        3. Sibling method attributes in the same class.
+
+        Args:
+            function_scope: Method scope where lookup happens
+            attr_name: Attribute name without ``self.`` prefix
+            line: 0-based line number for context
+
+        Returns:
+            Resolved TypeInfo or None when unresolved.
+        """
+        attr = function_scope.attributes.get(attr_name)
+        if attr and attr.type_str != "Unknown":
+            return attr
+
+        class_scope = self.get_class_scope_for_function_scope(function_scope)
+        if class_scope is None:
+            return None
+
+        class_attr = class_scope.attributes.get(attr_name)
+        if class_attr and class_attr.type_str != "Unknown" and class_attr.line <= line:
+            return class_attr
+
+        for sibling in class_scope.children:
+            if sibling.scope_type != ScopeType.FUNCTION:
+                continue
+            sibling_attr = sibling.attributes.get(attr_name)
+            if sibling_attr and sibling_attr.type_str != "Unknown" and sibling_attr.line <= line:
+                return sibling_attr
 
         return None
 

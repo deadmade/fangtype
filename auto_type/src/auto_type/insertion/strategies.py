@@ -6,7 +6,7 @@ specific types of type annotation insertions.
 
 import logging
 
-from .strategy import BaseInsertionStrategy
+from .strategy import BaseInsertionStrategy, InsertionStrategy
 from .types import InsertionContext, InsertionPlan, InsertionTarget, TargetType
 
 logger = logging.getLogger(__name__)
@@ -31,8 +31,7 @@ class VariableAssignmentStrategy(BaseInsertionStrategy):
         if not self.can_handle(target):
             raise ValueError(f"VariableAssignmentStrategy cannot handle {target.target_type}")
 
-        if not self.validate_type_syntax(target.type_annotation):
-            raise ValueError(f"Invalid type annotation syntax: {target.type_annotation}")
+        type_annotation = self.sanitize_type_annotation(target.type_annotation)
 
         # Check if variable already has annotation
         if context.has_annotation(target.name):
@@ -41,14 +40,14 @@ class VariableAssignmentStrategy(BaseInsertionStrategy):
                 target,
                 "replacement",
                 existing_type=existing_type,
-                new_type=target.type_annotation,
+                new_type=type_annotation,
             )
         else:
             plan = self._create_plan(
                 target,
                 "in_place",
                 variable_name=target.name,
-                type_annotation=target.type_annotation,
+                type_annotation=type_annotation,
             )
 
         self._log_planning(target, plan)
@@ -81,8 +80,7 @@ class ComplexAssignmentStrategy(BaseInsertionStrategy):
         if not self.can_handle(target):
             raise ValueError(f"ComplexAssignmentStrategy cannot handle {target.target_type}")
 
-        if not self.validate_type_syntax(target.type_annotation):
-            raise ValueError(f"Invalid type annotation syntax: {target.type_annotation}")
+        type_annotation = self.sanitize_type_annotation(target.type_annotation)
 
         # Check if variable already has annotation
         if context.has_annotation(target.name):
@@ -91,14 +89,14 @@ class ComplexAssignmentStrategy(BaseInsertionStrategy):
                 target,
                 "replacement",
                 existing_type=existing_type,
-                new_type=target.type_annotation,
+                new_type=type_annotation,
             )
         else:
             plan = self._create_plan(
                 target,
                 "declaration",
                 variable_name=target.name,
-                type_annotation=target.type_annotation,
+                type_annotation=type_annotation,
             )
 
         self._log_planning(target, plan)
@@ -120,14 +118,13 @@ class FunctionParameterStrategy(BaseInsertionStrategy):
         if not self.can_handle(target):
             raise ValueError(f"FunctionParameterStrategy cannot handle {target.target_type}")
 
-        if not self.validate_type_syntax(target.type_annotation):
-            raise ValueError(f"Invalid type annotation syntax: {target.type_annotation}")
+        type_annotation = self.sanitize_type_annotation(target.type_annotation)
 
         plan = self._create_plan(
             target,
             "function_signature",
             parameter_name=target.name,
-            type_annotation=target.type_annotation,
+            type_annotation=type_annotation,
             annotation_kind="parameter",
         )
 
@@ -150,14 +147,13 @@ class FunctionReturnStrategy(BaseInsertionStrategy):
         if not self.can_handle(target):
             raise ValueError(f"FunctionReturnStrategy cannot handle {target.target_type}")
 
-        if not self.validate_type_syntax(target.type_annotation):
-            raise ValueError(f"Invalid type annotation syntax: {target.type_annotation}")
+        type_annotation = self.sanitize_type_annotation(target.type_annotation)
 
         plan = self._create_plan(
             target,
             "function_signature",
             function_name=target.name,
-            type_annotation=target.type_annotation,
+            type_annotation=type_annotation,
             annotation_kind="return",
         )
 
@@ -180,15 +176,14 @@ class ClassVariableStrategy(BaseInsertionStrategy):
         if not self.can_handle(target):
             raise ValueError(f"ClassVariableStrategy cannot handle {target.target_type}")
 
-        if not self.validate_type_syntax(target.type_annotation):
-            raise ValueError(f"Invalid type annotation syntax: {target.type_annotation}")
+        type_annotation = self.sanitize_type_annotation(target.type_annotation)
 
         # For now, use in_place transformation - this will need refinement
         plan = self._create_plan(
             target,
             "in_place",
             variable_name=target.name,
-            type_annotation=target.type_annotation,
+            type_annotation=type_annotation,
             scope="class",
         )
 
@@ -211,8 +206,7 @@ class FunctionScopeVariableStrategy(BaseInsertionStrategy):
         if not self.can_handle(target):
             raise ValueError(f"FunctionScopeVariableStrategy cannot handle {target.target_type}")
 
-        if not self.validate_type_syntax(target.type_annotation):
-            raise ValueError(f"Invalid type annotation syntax: {target.type_annotation}")
+        type_annotation = self.sanitize_type_annotation(target.type_annotation)
 
         # Use in_place for simple assignments, declaration for complex ones
         # This determination could be made more sophisticated
@@ -222,7 +216,7 @@ class FunctionScopeVariableStrategy(BaseInsertionStrategy):
             target,
             transformation,
             variable_name=target.name,
-            type_annotation=target.type_annotation,
+            type_annotation=type_annotation,
             scope="function",
             scope_id=target.location.scope_id,
         )
@@ -231,7 +225,134 @@ class FunctionScopeVariableStrategy(BaseInsertionStrategy):
         return plan
 
 
-def create_default_strategies() -> list[BaseInsertionStrategy]:
+class SubscriptAccessStrategy(BaseInsertionStrategy):
+    """Strategy for subscript access assignments: value = d['key'] -> value: Type = d['key']"""
+
+    def __init__(self) -> None:
+        super().__init__("subscript_access")
+
+    def can_handle(self, target: InsertionTarget) -> bool:
+        """Check if this strategy handles subscript access assignments."""
+        return target.target_type == TargetType.SUBSCRIPT_ACCESS
+
+    def plan_insertion(self, target: InsertionTarget, context: InsertionContext) -> InsertionPlan:
+        """Plan insertion for subscript access assignment.
+
+        This strategy converts: value = container[key]  ->  value: type = container[key]
+        Uses LibCST's IN_PLACE transformation (Assign -> AnnAssign)
+        """
+        if not self.can_handle(target):
+            raise ValueError(f"SubscriptAccessStrategy cannot handle {target.target_type}")
+
+        type_annotation = self.sanitize_type_annotation(target.type_annotation)
+
+        # Check if variable already has annotation
+        if context.has_annotation(target.name):
+            existing_type = context.get_annotation(target.name)
+            plan = self._create_plan(
+                target,
+                "replacement",
+                existing_type=existing_type,
+                new_type=type_annotation,
+            )
+        else:
+            plan = self._create_plan(
+                target,
+                "in_place",
+                variable_name=target.name,
+                type_annotation=type_annotation,
+            )
+
+        self._log_planning(target, plan)
+        return plan
+
+
+class AttributeAccessStrategy(BaseInsertionStrategy):
+    """Strategy for attribute access assignments: self.attr = value -> self.attr: Type = value"""
+
+    def __init__(self) -> None:
+        super().__init__("attribute_access")
+
+    def can_handle(self, target: InsertionTarget) -> bool:
+        """Check if this strategy handles attribute access assignments."""
+        return target.target_type == TargetType.ATTRIBUTE_ACCESS
+
+    def plan_insertion(self, target: InsertionTarget, context: InsertionContext) -> InsertionPlan:
+        """Plan insertion for attribute access assignment.
+
+        This strategy converts: self.attr = value  ->  self.attr: type = value
+        Uses LibCST's IN_PLACE transformation (Assign -> AnnAssign)
+        """
+        if not self.can_handle(target):
+            raise ValueError(f"AttributeAccessStrategy cannot handle {target.target_type}")
+
+        type_annotation = self.sanitize_type_annotation(target.type_annotation)
+
+        # Check if variable already has annotation
+        if context.has_annotation(target.name):
+            existing_type = context.get_annotation(target.name)
+            plan = self._create_plan(
+                target,
+                "replacement",
+                existing_type=existing_type,
+                new_type=type_annotation,
+            )
+        else:
+            plan = self._create_plan(
+                target,
+                "in_place",
+                variable_name=target.name,
+                type_annotation=type_annotation,
+            )
+
+        self._log_planning(target, plan)
+        return plan
+
+
+class IterationVariableStrategy(BaseInsertionStrategy):
+    """Strategy for iteration variables: for i in range(10) -> i: int (pre-declaration)"""
+
+    def __init__(self) -> None:
+        super().__init__("iteration_variable")
+
+    def can_handle(self, target: InsertionTarget) -> bool:
+        """Check if this strategy handles iteration variable annotations."""
+        return target.target_type == TargetType.ITERATION_VARIABLE
+
+    def plan_insertion(self, target: InsertionTarget, context: InsertionContext) -> InsertionPlan:
+        """Plan insertion for iteration variable annotation.
+
+        This strategy inserts a standalone declaration before the loop:
+        for i in range(10)  ->  i: int\nfor i in range(10)
+        Uses LibCST's DECLARATION transformation
+        """
+        if not self.can_handle(target):
+            raise ValueError(f"IterationVariableStrategy cannot handle {target.target_type}")
+
+        type_annotation = self.sanitize_type_annotation(target.type_annotation)
+
+        # Check if variable already has annotation
+        if context.has_annotation(target.name):
+            existing_type = context.get_annotation(target.name)
+            plan = self._create_plan(
+                target,
+                "replacement",
+                existing_type=existing_type,
+                new_type=type_annotation,
+            )
+        else:
+            plan = self._create_plan(
+                target,
+                "declaration",
+                variable_name=target.name,
+                type_annotation=type_annotation,
+            )
+
+        self._log_planning(target, plan)
+        return plan
+
+
+def create_default_strategies() -> list[InsertionStrategy]:
     """Create the default set of insertion strategies.
 
     Returns:
@@ -244,4 +365,7 @@ def create_default_strategies() -> list[BaseInsertionStrategy]:
         FunctionReturnStrategy(),
         ClassVariableStrategy(),
         FunctionScopeVariableStrategy(),
+        SubscriptAccessStrategy(),
+        AttributeAccessStrategy(),
+        IterationVariableStrategy(),
     ]

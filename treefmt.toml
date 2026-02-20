@@ -1,0 +1,27 @@
+[formatter.ruff]
+command = "ruff"
+options = ["format"]
+includes = ["*.py"]
+excludes = ["tests/benchmarks/data/", "**/__pycache__/", "*.pyc"]
+
+[formatter.prettier]
+command = "prettier"
+options = ["--write"]
+includes = ["*.json", "*.yaml", "*.yml", "*.js", "*.ts"]
+excludes = [
+  "vscode-extension/node_modules/",
+  "vscode-extension/dist/",
+  "vscode-extension/out/",
+  "flake.lock",
+]
+
+[formatter.taplo]
+command = "taplo"
+options = ["format"]
+includes = ["*.toml"]
+
+[formatter.alejandra]
+command = "alejandra"
+options = []
+includes = ["*.nix"]
+excludes = ["flake.lock"]
