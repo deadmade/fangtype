@@ -5,6 +5,7 @@ import asyncio
 from auto_type.analysis.name_collector import NameCollector, NameLocation
 from auto_type.inference.jedi_engine import JediInferenceEngine
 from auto_type.utils.inlay_hint_helper import InlayHintHelper
+from auto_type.utils.settings import Settings
 
 
 class TestJediInferenceAtLocations:
@@ -17,7 +18,7 @@ y = x + 1"""
         engine = JediInferenceEngine()
 
         # x usage is at line 2, column 4
-        results = asyncio.run(engine.infer_types_at_locations(source, [(2, 4)]))
+        results = engine.infer_types_at_locations(source, [(2, 4)])
 
         assert (2, 4) in results
         assert results[(2, 4)] == "int"
@@ -29,7 +30,7 @@ greeting = name.upper()"""
         engine = JediInferenceEngine()
 
         # name usage is at line 2, column 11
-        results = asyncio.run(engine.infer_types_at_locations(source, [(2, 11)]))
+        results = engine.infer_types_at_locations(source, [(2, 11)])
 
         assert (2, 11) in results
         assert results[(2, 11)] == "str"
@@ -41,7 +42,7 @@ length = len(items)"""
         engine = JediInferenceEngine()
 
         # items usage is at line 2, column 13
-        results = asyncio.run(engine.infer_types_at_locations(source, [(2, 13)]))
+        results = engine.infer_types_at_locations(source, [(2, 13)])
 
         assert (2, 13) in results
         assert results[(2, 13)] == "list"
@@ -55,7 +56,7 @@ w = y.upper()"""
         engine = JediInferenceEngine()
 
         # x at line 3 col 4, y at line 4 col 4
-        results = asyncio.run(engine.infer_types_at_locations(source, [(3, 4), (4, 4)]))
+        results = engine.infer_types_at_locations(source, [(3, 4), (4, 4)])
 
         assert (3, 4) in results
         assert results[(3, 4)] == "int"
@@ -67,7 +68,7 @@ w = y.upper()"""
         source = "x = 42"
         engine = JediInferenceEngine()
 
-        results = asyncio.run(engine.infer_types_at_locations(source, []))
+        results = engine.infer_types_at_locations(source, [])
 
         assert results == {}
 
@@ -77,7 +78,7 @@ w = y.upper()"""
         engine = JediInferenceEngine()
 
         # Line 100 doesn't exist
-        results = asyncio.run(engine.infer_types_at_locations(source, [(100, 0)]))
+        results = engine.infer_types_at_locations(source, [(100, 0)])
 
         assert (100, 0) not in results
 
@@ -87,7 +88,9 @@ class TestInlayHintHelperUsageHints:
 
     def test_generates_usage_hint(self) -> None:
         """Test generating a usage hint."""
-        helper = InlayHintHelper(NameCollector(), JediInferenceEngine())
+        from auto_type.utils.settings import Settings
+
+        helper = InlayHintHelper(NameCollector(), JediInferenceEngine(), Settings())
 
         usage_locations = [
             NameLocation(name="x", line=2, col=4, is_definition=False, end_col=5),
@@ -104,7 +107,7 @@ class TestInlayHintHelperUsageHints:
 
     def test_skips_declaration_position(self) -> None:
         """Test that declaration positions are skipped."""
-        helper = InlayHintHelper(NameCollector(), JediInferenceEngine())
+        helper = InlayHintHelper(NameCollector(), JediInferenceEngine(), Settings())
 
         usage_locations = [
             NameLocation(name="x", line=1, col=0, is_definition=True, end_col=1),
@@ -118,7 +121,7 @@ class TestInlayHintHelperUsageHints:
 
     def test_skips_unknown_types(self) -> None:
         """Test that Unknown types are not shown."""
-        helper = InlayHintHelper(NameCollector(), JediInferenceEngine())
+        helper = InlayHintHelper(NameCollector(), JediInferenceEngine(), Settings())
 
         usage_locations = [
             NameLocation(name="x", line=2, col=4, is_definition=False, end_col=5),
@@ -132,7 +135,7 @@ class TestInlayHintHelperUsageHints:
 
     def test_skips_missing_types(self) -> None:
         """Test that locations without types are skipped."""
-        helper = InlayHintHelper(NameCollector(), JediInferenceEngine())
+        helper = InlayHintHelper(NameCollector(), JediInferenceEngine(), Settings())
 
         usage_locations = [
             NameLocation(name="x", line=2, col=4, is_definition=False, end_col=5),
@@ -146,7 +149,7 @@ class TestInlayHintHelperUsageHints:
 
     def test_multiple_usage_hints(self) -> None:
         """Test generating multiple usage hints."""
-        helper = InlayHintHelper(NameCollector(), JediInferenceEngine())
+        helper = InlayHintHelper(NameCollector(), JediInferenceEngine(), Settings())
 
         usage_locations = [
             NameLocation(name="x", line=2, col=4, is_definition=False, end_col=5),
@@ -172,9 +175,9 @@ class TestDeclarationPositions:
 y = "hello"
 """
         engine = JediInferenceEngine()
-        result = asyncio.run(engine.infer_types(source))
+        result = engine.infer_types(source)
 
-        helper = InlayHintHelper(NameCollector(), JediInferenceEngine())
+        helper = InlayHintHelper(NameCollector(), JediInferenceEngine(), Settings())
         positions = helper.get_declaration_positions(result.scope_tree)
 
         # Should have positions for x and y (converted to 1-based)
@@ -190,10 +193,10 @@ class TestIntegration:
 y = x + 1
 z = x * y"""
         engine = JediInferenceEngine()
-        helper = InlayHintHelper(NameCollector(), JediInferenceEngine())
+        helper = InlayHintHelper(NameCollector(), JediInferenceEngine(), Settings())
 
         # Get inference result for declarations
-        result = asyncio.run(engine.infer_types(source))
+        result = engine.infer_types(source)
         declaration_positions = helper.get_declaration_positions(result.scope_tree)
 
         # Collect usage locations
@@ -201,7 +204,7 @@ z = x * y"""
 
         # Infer types at usage locations
         locations_to_infer = [(loc.line, loc.col) for loc in usage_locations]
-        usage_types = asyncio.run(engine.infer_types_at_locations(source, locations_to_infer))
+        usage_types = engine.infer_types_at_locations(source, locations_to_infer)
 
         # Generate hints
         hints = helper.generate_usage_hints(usage_locations, usage_types, declaration_positions)
@@ -218,10 +221,10 @@ class TestProcessUsageHints:
         source = """x = 42
 y = x + 1"""
         engine = JediInferenceEngine()
-        helper = InlayHintHelper(NameCollector(), JediInferenceEngine())
+        helper = InlayHintHelper(NameCollector(), JediInferenceEngine(), Settings())
 
         # We need inference result for scope tree
-        result = asyncio.run(engine.infer_types(source))
+        result = engine.infer_types(source)
 
         hints = asyncio.run(
             helper.process_usage_hints(

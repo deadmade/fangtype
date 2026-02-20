@@ -4,10 +4,10 @@ This module defines the fundamental data types used throughout the unified
 insertion system, including targets, plans, and results.
 """
 
-import ast
+import ast  # noqa: TC003
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Literal, TypedDict
 
 
 class TargetType(Enum):
@@ -19,9 +19,12 @@ class TargetType(Enum):
     FUNCTION_RETURN = "function_return"  # def f(): -> def f() -> int:
     CLASS_VARIABLE = "class_variable"  # Future: class-level annotations
     FUNCTION_SCOPE_VARIABLE = "function_scope_variable"  # Future: vars in functions
+    SUBSCRIPT_ACCESS = "subscript_access"  # value = d['key'] -> value: Type = d['key']
+    ATTRIBUTE_ACCESS = "attribute_access"  # self.attr = value -> self.attr: Type = value
+    ITERATION_VARIABLE = "iteration_variable"  # for i in range(10) -> i: Type (pre-declaration)
 
     @classmethod
-    def from_string(cls, value: str) -> "TargetType":
+    def from_string(cls, value: str) -> TargetType:
         """Create TargetType from string value."""
         for target_type in cls:
             if target_type.value == value:
@@ -56,6 +59,39 @@ class CodeLocation:
             raise ValueError(f"Column must be >= 0, got {self.column}")
 
 
+class InsertionTargetMetadata(TypedDict, total=False):
+    """Optional metadata for insertion targets."""
+
+    function_name: str
+    qualified_function_name: str
+    object_name: str
+    attribute_name: str
+
+
+class InsertionPlanMetadata(TypedDict, total=False):
+    """Metadata used by insertion plans and transformer execution."""
+
+    variable_name: str
+    type_annotation: str
+    existing_type: str | None
+    new_type: str
+    function_name: str
+    parameter_name: str
+    annotation_kind: Literal["parameter", "return"]
+    scope: Literal["class", "function"]
+    scope_id: str | None
+
+
+def empty_target_metadata() -> InsertionTargetMetadata:
+    """Return an empty metadata mapping for targets."""
+    return {}
+
+
+def empty_plan_metadata() -> InsertionPlanMetadata:
+    """Return an empty metadata mapping for plans."""
+    return {}
+
+
 @dataclass
 class InsertionTarget:
     """Describes what to insert and where."""
@@ -64,7 +100,7 @@ class InsertionTarget:
     location: CodeLocation
     type_annotation: str
     name: str  # Variable/parameter name
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: InsertionTargetMetadata = field(default_factory=empty_target_metadata)
 
     def __post_init__(self) -> None:
         """Validate target data."""
@@ -76,7 +112,13 @@ class InsertionTarget:
     @property
     def is_variable_target(self) -> bool:
         """Check if this is a variable-related insertion."""
-        return self.target_type in (TargetType.VARIABLE_SIMPLE, TargetType.VARIABLE_COMPLEX)
+        return self.target_type in (
+            TargetType.VARIABLE_SIMPLE,
+            TargetType.VARIABLE_COMPLEX,
+            TargetType.SUBSCRIPT_ACCESS,
+            TargetType.ATTRIBUTE_ACCESS,
+            TargetType.ITERATION_VARIABLE,
+        )
 
     @property
     def is_function_target(self) -> bool:
@@ -92,7 +134,7 @@ class InsertionPlan:
     target: InsertionTarget
     transformation: TransformationType
     dependencies: list[str] = field(default_factory=list)  # Other target names this depends on
-    metadata: dict[str, Any] = field(default_factory=dict)  # Strategy-specific data
+    metadata: InsertionPlanMetadata = field(default_factory=empty_plan_metadata)
 
     @property
     def priority(self) -> int:
@@ -116,7 +158,7 @@ class InsertionResult:
     inserted_count: int
     error_message: str | None = None
     failed_targets: list[InsertionTarget] = field(default_factory=list)
-    details: dict[str, Any] = field(default_factory=dict)
+    details: dict[str, object] = field(default_factory=dict)
 
     @property
     def has_changes(self) -> bool:
@@ -128,8 +170,8 @@ class InsertionResult:
         cls,
         modified_source: str,
         inserted_count: int,
-        details: dict[str, Any] | None = None,
-    ) -> "InsertionResult":
+        details: dict[str, object] | None = None,
+    ) -> InsertionResult:
         """Create a successful insertion result."""
         return cls(
             modified_source=modified_source,
@@ -144,7 +186,7 @@ class InsertionResult:
         original_source: str,
         error_message: str,
         failed_targets: list[InsertionTarget] | None = None,
-    ) -> "InsertionResult":
+    ) -> InsertionResult:
         """Create an error insertion result."""
         return cls(
             modified_source=original_source,
@@ -161,7 +203,7 @@ class InsertionContext:
 
     source: str
     existing_annotations: dict[str, str] = field(default_factory=dict)  # name -> type_str
-    scope_info: dict[str, Any] = field(default_factory=dict)
+    scope_info: dict[str, object] = field(default_factory=dict)
     ast_tree: ast.AST | None = None
 
     def has_annotation(self, name: str) -> bool:

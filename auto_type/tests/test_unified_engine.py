@@ -47,6 +47,42 @@ class TestUnifiedInsertionEngine:
         assert result.inserted_count == 1
         assert "def func(x: int):" in result.modified_source
 
+    def test_vararg_parameter_insertion(self) -> None:
+        """Test vararg parameter annotation insertion."""
+        engine = UnifiedInsertionEngine()
+
+        source = "def func(*items):\n    return items\n"
+        target = InsertionTarget(
+            target_type=TargetType.FUNCTION_PARAMETER,
+            location=CodeLocation(line=1, column=0),
+            type_annotation="tuple[int, ...]",
+            name="items",
+        )
+
+        result = engine.insert([target], source)
+
+        assert result.success
+        assert result.inserted_count == 1
+        assert "def func(*items: tuple[int, ...]):" in result.modified_source
+
+    def test_kwarg_parameter_insertion(self) -> None:
+        """Test kwarg parameter annotation insertion."""
+        engine = UnifiedInsertionEngine()
+
+        source = "def func(**kwargs):\n    return kwargs\n"
+        target = InsertionTarget(
+            target_type=TargetType.FUNCTION_PARAMETER,
+            location=CodeLocation(line=1, column=0),
+            type_annotation="dict[str, str]",
+            name="kwargs",
+        )
+
+        result = engine.insert([target], source)
+
+        assert result.success
+        assert result.inserted_count == 1
+        assert "def func(**kwargs: dict[str, str]):" in result.modified_source
+
     def test_function_return_insertion(self) -> None:
         """Test function return type annotation insertion."""
         engine = UnifiedInsertionEngine()
@@ -140,6 +176,7 @@ class TestUnifiedInsertionEngine:
 
         assert not result.success
         assert result.inserted_count == 0
+        assert result.error_message is not None
         assert "Invalid type annotation syntax" in result.error_message
 
     def test_empty_targets(self) -> None:

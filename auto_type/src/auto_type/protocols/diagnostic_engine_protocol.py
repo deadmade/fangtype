@@ -2,7 +2,8 @@
 
 from typing import Protocol, runtime_checkable
 
-from lsprotocol import types
+from lsprotocol import types  # noqa: TC002
+from pygls.lsp.server import LanguageServer  # noqa: TC002
 
 
 @runtime_checkable
@@ -24,5 +25,24 @@ class DiagnosticEngineProtocol(Protocol):
 
         Returns:
             List of LSP Diagnostic objects
+        """
+        ...
+
+    async def run_diagnostics(self, ls: LanguageServer, uri: str, source: str) -> None:
+        """Generate and publish diagnostics for a document.
+
+        Args:
+            ls: The language server instance
+            uri: Document URI
+            source: Document source code
+        """
+        ...
+
+    def schedule_diagnostics(self, ls: LanguageServer, uri: str) -> None:
+        """Schedule debounced diagnostics for a document.
+
+        Args:
+            ls: The language server instance
+            uri: Document URI
         """
         ...

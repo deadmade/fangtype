@@ -1,6 +1,4 @@
-import pytest
-
-from auto_type.inference import JediInferenceEngine
+from auto_type.inference.jedi_engine import JediInferenceEngine
 from auto_type.insertion import (
     CodeLocation,
     InsertionTarget,
@@ -9,8 +7,7 @@ from auto_type.insertion import (
 )
 
 
-@pytest.mark.asyncio
-async def test_full_pipeline_inference_to_insertion(tmp_path):
+def test_full_pipeline_inference_to_insertion(tmp_path):
     # 1. Setup real file
     source_file = tmp_path / "test.py"
     source_file.write_text("def add(a, b): return a + b\nx = add(1, 2)")
@@ -21,11 +18,15 @@ async def test_full_pipeline_inference_to_insertion(tmp_path):
 
     # 3. Infer
     # Note: Using str(source_file) as path so Jedi can find it
-    await inference.infer_types(source_file.read_text(), str(source_file))
+    result = inference.infer_types(source_file.read_text(), str(source_file))
 
     # 4. Verify Inference
     # (Assuming inference works, x should be int)
-    vars = await inference.infer_variable_types(source_file.read_text())
+    vars = {
+        name: info.type_str
+        for name, info in result.scope_tree.root.variables.items()
+        if info.type_str != "Unknown"
+    }
     # Note: Depending on Jedi version and environment, it might infer 'int' or exact value.
     # We check if 'x' is in vars.
     assert "x" in vars

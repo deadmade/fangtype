@@ -7,7 +7,14 @@ from lsprotocol import types
 
 from auto_type.diagnostics import DiagnosticEngine
 from auto_type.protocols import TypeValidatorProtocol
+from auto_type.utils.settings import Settings
 from auto_type.validation import MypyTypeValidator
+
+
+@pytest.fixture
+def mock_settings():
+    """Create a default Settings instance."""
+    return Settings()
 
 
 @pytest.fixture
@@ -19,9 +26,9 @@ def mock_validator(mocker):
 
 
 @pytest.fixture
-def engine_with_mock(mock_validator):
-    """Create a DiagnosticEngine with mocked validator."""
-    return DiagnosticEngine(mock_validator)
+def engine_with_mock(mock_validator, mock_settings):
+    """Create a DiagnosticEngine with mocked validator and settings."""
+    return DiagnosticEngine(mock_validator, mock_settings)
 
 
 @pytest.fixture

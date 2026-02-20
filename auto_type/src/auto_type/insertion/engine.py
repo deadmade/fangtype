@@ -6,12 +6,12 @@ all insertion strategies and executes insertions through the unified transformer
 
 import ast
 import logging
-from typing import Any
+from typing import Any, cast
 
 import libcst as cst
 
 from .strategies import create_default_strategies
-from .strategy import find_strategy_for_target, validate_strategies
+from .strategy import InsertionStrategy, find_strategy_for_target, validate_strategies
 from .transformer import UnifiedTransformer
 from .types import (
     CodeLocation,
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 class UnifiedInsertionEngine:
     """Unified engine that handles all insertion types through strategies."""
 
-    def __init__(self, strategies: list | None = None) -> None:
+    def __init__(self, strategies: list[InsertionStrategy] | None = None) -> None:
         """Initialize the engine with insertion strategies.
 
         Args:
@@ -36,9 +36,8 @@ class UnifiedInsertionEngine:
         """
         self._strategies = strategies if strategies is not None else create_default_strategies()
         validate_strategies(self._strategies)
-        self._logger = logging.getLogger(f"{__name__}.UnifiedInsertionEngine")
 
-        self._logger.info(
+        logger.info(
             f"Initialized with {len(self._strategies)} strategies: "
             f"{[s.name for s in self._strategies]}"
         )
@@ -48,19 +47,20 @@ class UnifiedInsertionEngine:
         if not targets:
             return InsertionResult.success_result(source, 0, {"message": "No targets provided"})
 
-        self._logger.info(f"Starting insertion for {len(targets)} targets")
+        logger.info(f"Starting insertion for {len(targets)} targets")
 
         try:
             # 1. Planning Phase
             context = self._create_insertion_context(source)
-            plans, failed_targets = self._create_execution_plans(targets, context)
+            plans, failures = self._create_execution_plans(targets, context)
 
             # If any targets failed, return error result
-            if failed_targets:
+            if failures:
                 error_messages = []
-                for target in failed_targets:
-                    planning_error = getattr(target, "_planning_error", "")
-                    if "Invalid type annotation syntax" in str(planning_error):
+                failed_targets = []
+                for target, error in failures:
+                    failed_targets.append(target)
+                    if "Invalid type annotation syntax" in error:
                         error_messages.append(
                             f"Invalid type annotation syntax: {target.type_annotation}"
                         )
@@ -81,7 +81,7 @@ class UnifiedInsertionEngine:
             return self._execute_plans(ordered_plans, source)
 
         except Exception as e:
-            self._logger.error(f"Insertion failed: {e}", exc_info=True)
+            logger.error(f"Insertion failed: {e}", exc_info=True)
             return InsertionResult.error_result(source, str(e), targets)
 
     def _create_insertion_context(self, source: str) -> InsertionContext:
@@ -101,7 +101,7 @@ class UnifiedInsertionEngine:
             )
 
         except SyntaxError as e:
-            self._logger.warning(f"Failed to parse source for context: {e}")
+            logger.warning(f"Failed to parse source for context: {e}")
             # Return minimal context if parsing fails
             return InsertionContext(source=source)
 
@@ -118,39 +118,40 @@ class UnifiedInsertionEngine:
                 existing[name] = annotation
 
         except Exception as e:
-            self._logger.debug(f"Could not extract existing annotations: {e}")
+            logger.debug(f"Could not extract existing annotations: {e}")
 
         return existing
 
     def _create_execution_plans(
         self, targets: list[InsertionTarget], context: InsertionContext
-    ) -> tuple[list[InsertionPlan], list[InsertionTarget]]:
+    ) -> tuple[list[InsertionPlan], list[tuple[InsertionTarget, str]]]:
         """Create execution plans using appropriate strategies."""
         plans: list[InsertionPlan] = []
-        failed_targets: list[InsertionTarget] = []
+        failures: list[tuple[InsertionTarget, str]] = []
 
         for target in targets:
             try:
                 strategy = find_strategy_for_target(self._strategies, target)
                 if strategy is None:
-                    self._logger.warning(f"No strategy found for target: {target.target_type}")
-                    failed_targets.append(target)
+                    msg = f"No strategy found for target: {target.target_type}"
+                    logger.warning(msg)
+                    failures.append((target, msg))
                     continue
 
                 plan = strategy.plan_insertion(target, context)
                 plans.append(plan)
-                self._logger.debug(f"Created plan for {target.name} using {strategy.name}")
+                logger.debug(f"Created plan for {target.name} using {strategy.name}")
 
             except Exception as e:
                 # Store the error for better error reporting
-                target._planning_error = str(e)
-                self._logger.warning(f"Failed to plan insertion for {target.name}: {e}")
-                failed_targets.append(target)
+                msg = str(e)
+                logger.warning(f"Failed to plan insertion for {target.name}: {e}")
+                failures.append((target, msg))
 
-        if failed_targets:
-            self._logger.warning(f"Failed to plan {len(failed_targets)} insertions")
+        if failures:
+            logger.warning(f"Failed to plan {len(failures)} insertions")
 
-        return plans, failed_targets
+        return plans, failures
 
     def _resolve_dependencies(self, plans: list[InsertionPlan]) -> list[InsertionPlan]:
         """Resolve dependencies and sort plans by execution priority."""
@@ -161,17 +162,20 @@ class UnifiedInsertionEngine:
     def _execute_plans(self, plans: list[InsertionPlan], source: str) -> InsertionResult:
         """Execute all plans in a single LibCST transformation."""
         if not plans:
-            return InsertionResult.success_result(source, 0, {"message": "No plans to execute"})
+            return InsertionResult.success_result(
+                modified_source=source, inserted_count=0, details={"message": "No plans to execute"}
+            )
 
         try:
             # Parse the source
             tree = cst.parse_module(source)
 
-            # Create and apply the unified transformer
+            # Create and apply the unified transformer using MetadataWrapper
+            wrapper = cst.metadata.MetadataWrapper(tree)
             transformer = UnifiedTransformer(plans)
 
             # Apply transformation
-            modified_tree = tree.visit(transformer)
+            modified_tree = wrapper.visit(transformer)
 
             # Generate the modified source
             modified_source = modified_tree.code
@@ -179,25 +183,25 @@ class UnifiedInsertionEngine:
             # Get execution summary
             summary = transformer.get_execution_summary()
 
-            self._logger.info(
+            logger.info(
                 f"Execution completed: {summary['inserted_count']} insertions, "
                 f"{summary['failed_count']} failures"
             )
 
             return InsertionResult.success_result(
                 modified_source,
-                summary["inserted_count"],
+                cast("int", summary["inserted_count"]),
                 summary,
             )
 
         except cst.ParserSyntaxError as e:
             error_msg = f"Source parsing failed: {e}"
-            self._logger.error(error_msg)
+            logger.error(error_msg)
             return InsertionResult.error_result(source, error_msg)
 
         except Exception as e:
             error_msg = f"Transformation failed: {e}"
-            self._logger.error(error_msg, exc_info=True)
+            logger.error(error_msg, exc_info=True)
             return InsertionResult.error_result(source, error_msg)
 
     # Convenience methods for backward compatibility and ease of use
@@ -249,10 +253,10 @@ class UnifiedInsertionEngine:
         """Preview what insertions would be performed without executing them."""
         try:
             context = self._create_insertion_context(source)
-            plans, failed_targets = self._create_execution_plans(targets, context)
+            plans, _failures = self._create_execution_plans(targets, context)
             ordered_plans = self._resolve_dependencies(plans)
 
-            preview = {
+            preview: dict[str, Any] = {
                 "total_plans": len(ordered_plans),
                 "plans_by_strategy": {},
                 "plan_details": [],
@@ -277,7 +281,7 @@ class UnifiedInsertionEngine:
             return preview
 
         except Exception as e:
-            self._logger.error(f"Preview failed: {e}")
+            logger.error(f"Preview failed: {e}")
             return {"error": str(e)}
 
 

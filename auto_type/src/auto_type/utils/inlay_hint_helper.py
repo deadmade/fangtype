@@ -1,16 +1,19 @@
+from __future__ import annotations
+
 import ast
 import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from injector import inject
 from lsprotocol import types
 
-from auto_type.analysis.name_collector import NameCollector, NameLocation
-from auto_type.analysis.types import ScopeType
-from auto_type.protocols import (
-    InferenceEngineProtocol,
-)
+from auto_type.analysis import NameCollector, NameLocation, ScopeType
+from auto_type.protocols import InferenceEngineProtocol  # noqa: TC001
+from auto_type.utils.settings import Settings  # noqa: TC001
+
+if TYPE_CHECKING:
+    from auto_type.validation.mypy_validator import TypeValidationResult
 
 logger = logging.getLogger(__name__)
 
@@ -18,15 +21,19 @@ logger = logging.getLogger(__name__)
 class InlayHintHelper:
     """Helper class for generating inlay hints.
 
-    Some methods are async because they use the async inference engine.
+    Some methods remain async because they also use async validation/LSP orchestration.
     """
 
     @inject
     def __init__(
-        self, name_collector: NameCollector, inference_engine: InferenceEngineProtocol
+        self,
+        name_collector: NameCollector,
+        inference_engine: InferenceEngineProtocol,
+        settings: Settings,
     ) -> None:
         self.name_collector = name_collector
         self.inference_engine = inference_engine
+        self.settings = settings
 
     def get_annotated_variable_names(self, scope: Any) -> set[str]:
         """Get names of variables with explicit type annotations in a scope.
@@ -60,7 +67,11 @@ class InlayHintHelper:
         return annotated_vars
 
     def generate_hints_for_scope(
-        self, scope: Any, source: str, validated_types: dict[str, str], scope_id: str
+        self,
+        scope: Any,
+        source: str,
+        validation_results: dict[str, TypeValidationResult],
+        scope_id: str,
     ) -> list[types.InlayHint]:
         """Generate inlay hints for all variables/parameters/returns in a scope.
 
@@ -69,8 +80,9 @@ class InlayHintHelper:
         Args:
             scope: Scope object containing variables, parameters, and return type
             source: Source code (needed for return type hint positioning)
-            validated_types: Pre-validated types dict with keys like "scope_id.category.name"
-            scope_id: ID of this scope for constructing validated_types keys
+            validation_results: Pre-validated types dict with keys like "scope_id.category.name"
+                Maps to TypeValidationResult containing type string and validation status
+            scope_id: ID of this scope for constructing validation_results keys
 
         Returns:
             List of inlay hints for this scope
@@ -95,17 +107,28 @@ class InlayHintHelper:
                 )
                 continue
 
-            # Check if type was validated
+            # Check if type was validated - show all types, mark invalid ones
             validation_key = f"{scope_id}.var.{var_name}"
-            if validation_key in validated_types:
+            if validation_key in validation_results:
+                validation_result = validation_results[validation_key]
+
+                # Build label with warning prefix if invalid
+                if validation_result.is_valid:
+                    label = f" {type_info.type_str}"
+                    tooltip = None
+                else:
+                    label = f" ⚠️ {type_info.type_str}"
+                    tooltip = "Type validation failed"
+
                 hint = types.InlayHint(
                     position=types.Position(
                         line=type_info.line, character=type_info.col + len(var_name)
                     ),
-                    label=f" {type_info.type_str}",
+                    label=label,
                     kind=types.InlayHintKind.Type,
                     padding_left=False,
                     padding_right=False,
+                    tooltip=tooltip,
                 )
                 hints.append(hint)
 
@@ -132,17 +155,28 @@ class InlayHintHelper:
                         )
                         continue
 
-                    # Check if type was validated
+                    # Check if type was validated - show all types, mark invalid ones
                     validation_key = f"{scope_id}.param.{param_name}"
-                    if validation_key in validated_types:
+                    if validation_key in validation_results:
+                        validation_result = validation_results[validation_key]
+
+                        # Build label with warning prefix if invalid
+                        if validation_result.is_valid:
+                            label = f": {type_info.type_str}"
+                            tooltip = None
+                        else:
+                            label = f": ⚠️ {type_info.type_str}"
+                            tooltip = "Type validation failed"
+
                         hint = types.InlayHint(
                             position=types.Position(
                                 line=type_info.line, character=type_info.col + len(param_name)
                             ),
-                            label=f": {type_info.type_str}",
+                            label=label,
                             kind=types.InlayHintKind.Type,
                             padding_left=False,
                             padding_right=False,
+                            tooltip=tooltip,
                         )
                         hints.append(hint)
 
@@ -152,8 +186,10 @@ class InlayHintHelper:
                     scope.return_type
                     and scope.return_type.type_str != "Unknown"
                     and not func_node.returns
-                    and validation_key in validated_types
+                    and validation_key in validation_results
                 ):
+                    validation_result = validation_results[validation_key]
+
                     # Find closing paren position
                     func_line = func_node.lineno - 1
                     lines = source.splitlines()
@@ -162,14 +198,23 @@ class InlayHintHelper:
                         # Find closing paren
                         close_paren_pos = line_text.rfind(")")
                         if close_paren_pos != -1:
+                            # Build label with warning prefix if invalid
+                            if validation_result.is_valid:
+                                label = f" -> {scope.return_type.type_str}"
+                                tooltip = None
+                            else:
+                                label = f" -> ⚠️ {scope.return_type.type_str}"
+                                tooltip = "Type validation failed"
+
                             hint = types.InlayHint(
                                 position=types.Position(
                                     line=func_line, character=close_paren_pos + 1
                                 ),
-                                label=f" -> {scope.return_type.type_str}",
+                                label=label,
                                 kind=types.InlayHintKind.Type,
                                 padding_left=False,
                                 padding_right=False,
+                                tooltip=tooltip,
                             )
                             hints.append(hint)
 
@@ -185,7 +230,7 @@ class InlayHintHelper:
     ) -> list[types.InlayHint]:
         """Generate usage-site hints (Phase 4).
 
-        This method is async because it uses the async inference engine.
+        This method is async because it is part of async hint orchestration.
 
         Args:
             source: Source code of the document
@@ -193,10 +238,13 @@ class InlayHintHelper:
             range_start_line: Start line of the visible range
             range_end_line: End line of the visible range
             inference_result: InferenceResult containing scope_tree
-
         Returns:
             List of generated inlay hints
         """
+        if not self.settings.show_usage_hints:
+            logger.debug("Usage hints are disabled in settings")
+            return []
+
         # PHASE 4: Generate usage-site hints
         start_usage = time.time()
         hints: list[types.InlayHint] = []
@@ -213,15 +261,20 @@ class InlayHintHelper:
             # Get declaration positions to exclude from usage hints
             declaration_positions = self.get_declaration_positions(inference_result.scope_tree)
 
-            # Infer types at usage locations (async)
+            # Collect all annotated variable names from all scopes
+            annotated_variable_names = self.get_all_annotated_variable_names(
+                inference_result.scope_tree
+            )
+
+            # Infer types at usage locations (sync)
             locations_to_infer = [(loc.line, loc.col) for loc in usage_locations]
-            usage_types = await self.inference_engine.infer_types_at_locations(
+            usage_types = self.inference_engine.infer_types_at_locations(
                 source, locations_to_infer, file_path
             )
 
             # Generate usage hints
             usage_hints = self.generate_usage_hints(
-                usage_locations, usage_types, declaration_positions
+                usage_locations, usage_types, declaration_positions, annotated_variable_names
             )
             hints.extend(usage_hints)
 
@@ -240,6 +293,7 @@ class InlayHintHelper:
         usage_locations: list[NameLocation],
         usage_types: dict[tuple[int, int], str],
         declaration_positions: set[tuple[int, int]],
+        annotated_variable_names: set[str] | None = None,
     ) -> list[types.InlayHint]:
         """Generate inlay hints for name usage sites.
 
@@ -251,6 +305,8 @@ class InlayHintHelper:
             usage_locations: List of NameLocation objects for usage sites
             usage_types: Dict mapping (line, col) to inferred type string
             declaration_positions: Set of (line, col) for declarations to skip
+            annotated_variable_names: Set of variable names that are already
+                annotated at their declarations (to skip usage hints for them)
 
         Returns:
             List of InlayHint objects for usage sites
@@ -260,6 +316,10 @@ class InlayHintHelper:
         for loc in usage_locations:
             # Skip declaration sites (they have their own hints)
             if (loc.line, loc.col) in declaration_positions:
+                continue
+
+            # Skip variables that are already annotated at declaration
+            if annotated_variable_names and loc.name in annotated_variable_names:
                 continue
 
             # Get the type for this location
@@ -311,3 +371,22 @@ class InlayHintHelper:
                     positions.add((type_info.line + 1, type_info.col))
 
         return positions
+
+    def get_all_annotated_variable_names(self, scope_tree: Any) -> set[str]:
+        """Get all annotated variable names from all scopes.
+
+        Used to exclude already-annotated variables from usage hints.
+
+        Args:
+            scope_tree: ScopeTree object containing all scopes
+
+        Returns:
+            Set of variable names that have explicit type annotations
+        """
+        annotated_names: set[str] = set()
+
+        for scope in scope_tree.scopes_by_id.values():
+            scope_annotated = self.get_annotated_variable_names(scope)
+            annotated_names.update(scope_annotated)
+
+        return annotated_names
