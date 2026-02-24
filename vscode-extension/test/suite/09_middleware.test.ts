@@ -68,6 +68,7 @@ suite('Inlay Hint Middleware', function () {
         provideInlayHints = getProvideInlayHints(middleware);
         // Clear any leftover cache from previous tests
         clearInlayHintCache('file:///test.py');
+        clearInlayHintCache('file:///test1.py');
         clearInlayHintCache('file:///test2.py');
     });
 

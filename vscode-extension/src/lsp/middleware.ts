@@ -152,7 +152,10 @@ export function createMiddleware(outputChannel: { appendLine: (msg: string) => v
                         hint.position.line >= range.start.line &&
                         hint.position.line <= range.end.line
                 );
-            } catch {
+            } catch (error) {
+                outputChannel.appendLine(
+                    `[RETRY] Initial inlay hints request failed, entering retry flow: ${error}`
+                );
                 return retryOperation(
                     async () => {
                         const fullRange = new Range(0, 0, document.lineCount, 0);

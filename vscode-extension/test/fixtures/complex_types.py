@@ -1,4 +1,3 @@
-# type: ignore
 # Complex type inference
 users = [{"name": "Alice", "age": 30}]
 maybe_value = None if True else 42
