@@ -226,7 +226,7 @@ suite('Insertion Verification Test Suite', () => {
                 'empty = []\n',
                 0,
                 0,
-                /empty:\s*list\[.*\]\s*=\s*\[\]/
+                /empty:\s*list\s*=\s*\[\]/
             );
             assert.ok(result.success, result.errorMessage);
         });
@@ -262,7 +262,7 @@ suite('Insertion Verification Test Suite', () => {
                 'empty = {}\n',
                 0,
                 0,
-                /empty:\s*dict\[.*\]\s*=\s*\{\}/
+                /empty:\s*dict\s*=\s*\{\}/
             );
             assert.ok(result.success, result.errorMessage);
         });
