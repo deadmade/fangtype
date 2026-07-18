@@ -1,4 +1,8 @@
 [submodule "auto_type/benchmark/data/TypeEvalPy"]
-	path = auto_type/benchmark/data/TypeEvalPy
+	path = code/lsp/benchmark/data/TypeEvalPy
 	url = https://github.com/secure-software-engineering/TypeEvalPy.git
+	ignore = all
+[submodule "auto_type/benchmark/data/mypy"]
+	path = code/lsp/benchmark/data/mypy
+	url = https://github.com/python/mypy.git
 	ignore = all
