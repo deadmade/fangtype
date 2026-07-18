@@ -1,0 +1,209 @@
+{
+    "name": "fangtype",
+    "displayName": "Fangtype",
+    "description": "Interactive Python type annotation with ghost text",
+    "version": "0.5.5",
+    "publisher": "fangtype",
+    "author": "deadmade",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/deadmade/fangtype.git"
+    },
+    "engines": {
+        "vscode": "^1.108.0"
+    },
+    "categories": [
+        "Programming Languages",
+        "Linters"
+    ],
+    "extensionDependencies": [
+        "ms-python.python"
+    ],
+    "extensionPack": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-python.vscode-python-envs"
+    ],
+    "activationEvents": [
+        "onLanguage:python",
+        "workspaceContains:**/*.py",
+        "workspaceContains:**/pyproject.toml",
+        "workspaceContains:**/requirements.txt"
+    ],
+    "main": "./dist/extension.cjs",
+    "contributes": {
+        "commands": [
+            {
+                "command": "fangtype.insertTypeAtCursor",
+                "title": "Fangtype: Insert Type Annotation at Cursor",
+                "category": "Fangtype"
+            },
+            {
+                "command": "fangtype.insertAllTypes",
+                "title": "Fangtype: Insert All Type Annotations in File",
+                "category": "Fangtype"
+            },
+            {
+                "command": "fangtype.removeTypeAtCursor",
+                "title": "Fangtype: Remove Type Annotation at Cursor",
+                "category": "Fangtype"
+            },
+            {
+                "command": "fangtype.removeAllTypes",
+                "title": "Fangtype: Remove All Type Annotations in File",
+                "category": "Fangtype"
+            },
+            {
+                "command": "fangtype.restart",
+                "title": "Fangtype: Restart Language Server",
+                "category": "Fangtype"
+            },
+            {
+                "command": "fangtype.rebuildEnvironment",
+                "title": "Fangtype: Rebuild Environment",
+                "category": "Fangtype"
+            }
+        ],
+        "menus": {
+            "editor/context": [
+                {
+                    "command": "fangtype.insertTypeAtCursor",
+                    "when": "editorTextFocus && editorLangId == python",
+                    "group": "9_fangtype@1"
+                },
+                {
+                    "command": "fangtype.insertAllTypes",
+                    "when": "editorTextFocus && editorLangId == python",
+                    "group": "9_fangtype@2"
+                },
+                {
+                    "command": "fangtype.removeTypeAtCursor",
+                    "when": "editorTextFocus && editorLangId == python",
+                    "group": "9_fangtype@3"
+                },
+                {
+                    "command": "fangtype.removeAllTypes",
+                    "when": "editorTextFocus && editorLangId == python",
+                    "group": "9_fangtype@4"
+                }
+            ],
+            "commandPalette": [
+                {
+                    "command": "fangtype.insertTypeAtCursor",
+                    "when": "editorLangId == python"
+                },
+                {
+                    "command": "fangtype.insertAllTypes",
+                    "when": "editorLangId == python"
+                },
+                {
+                    "command": "fangtype.removeTypeAtCursor",
+                    "when": "editorLangId == python"
+                },
+                {
+                    "command": "fangtype.removeAllTypes",
+                    "when": "editorLangId == python"
+                }
+            ]
+        },
+        "keybindings": [
+            {
+                "command": "fangtype.insertTypeAtCursor",
+                "key": "alt+enter",
+                "when": "editorTextFocus && editorLangId == python"
+            }
+        ],
+        "configuration": {
+            "type": "object",
+            "title": "Fangtype",
+            "properties": {
+                "fangtype.interpreter": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "scope": "resource",
+                    "markdownDescription": "Path to a Python interpreter (argv form: executable then args) used to launch the language server. When empty, the interpreter selected via the Python extension is used."
+                },
+                "fangtype.installMode": {
+                    "type": "string",
+                    "default": "managed",
+                    "enum": [
+                        "managed",
+                        "fromEnvironment",
+                        "useBundled"
+                    ],
+                    "enumDescriptions": [
+                        "Build and own a dedicated virtual environment for the server's dependencies (under the extension's global storage) and launch the server from it. Never touches your project or global interpreter; inference/validation stay project-aware. Recommended.",
+                        "Launch the server under the selected interpreter and, if its dependencies are missing, offer to pip-install them into that interpreter. Mutates the selected environment.",
+                        "Launch the server under the selected interpreter, importing the bundled copy of the pure-Python fangtype package first (no install). Only fangtype is bundled; its third-party dependencies (mypy, libcst, jedi, pygls, injector) must already be importable from the selected interpreter — otherwise use fromEnvironment or managed."
+                    ],
+                    "scope": "window",
+                    "markdownDescription": "How the server's Python dependencies (mypy, jedi, libcst, …) are provided. `managed` (default) creates an isolated virtual environment so nothing is installed into your project or global interpreter."
+                },
+                "fangtype.mypyEnabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Whether to run mypy validation for diagnostics."
+                },
+                "fangtype.mypyInferenceValidationEnabled": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Whether to run mypy validation for inference-result validation (e.g., inlay hints)."
+                },
+                "fangtype.crossFileContractsEnabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Whether to use cross-file contracts (function signatures inferred from callers/callees in other files) during inference."
+                },
+                "fangtype.logLevel": {
+                    "type": "string",
+                    "default": "warning",
+                    "enum": [
+                        "debug",
+                        "info",
+                        "warning",
+                        "error",
+                        "critical"
+                    ],
+                    "description": "Log level for the Fangtype language server."
+                }
+            }
+        }
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run build",
+        "build": "npx tsx ./scripts/build-with-esbuild.ts",
+        "watch": "npx tsx ./scripts/watch-with-esbuild.ts",
+        "package": "vsce package",
+        "lint": "eslint src",
+        "typecheck": "tsc --noEmit -p tsconfig.json",
+        "test:unit": "npx tsx node_modules/mocha/bin/_mocha --ui tdd --require ./test/unit/stub-vscode.cjs 'test/unit/**/*.test.ts'",
+        "pretest": "npm run build && npm run typecheck",
+        "test": "npm run test:unit && vscode-test",
+        "test:ci": "npm run test:unit && vscode-test"
+    },
+    "dependencies": {
+        "@vscode/python-extension": "^1.0.5",
+        "vscode-languageclient": "^10.1.0"
+    },
+    "devDependencies": {
+        "@eslint/js": "^10.0.0",
+        "@types/node": "^26.1.0",
+        "@types/vscode": "^1.108.1",
+        "@vscode/test-cli": "^0.0.15",
+        "@vscode/test-electron": "3.0.0",
+        "@vscode/vsce": "^3.7.1",
+        "esbuild": "^0.28.1",
+        "eslint": "^10.0.0",
+        "mocha-junit-reporter": "^2.2.1",
+        "tsx": "^4.21.0",
+        "typescript-eslint": "^8.56.0"
+    },
+    "peerDependencies": {
+        "typescript": "^6.0.3"
+    },
+    "icon": "image.png"
+}
