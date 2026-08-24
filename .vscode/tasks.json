@@ -3,19 +3,6 @@
   "tasks": [
     {
       "type": "shell",
-      "command": "npm run bundle-server",
-      "label": "npm: bundle-server",
-      "options": {
-        "cwd": "${workspaceFolder}/vscode-extension"
-      },
-      "presentation": {
-        "reveal": "always",
-        "panel": "shared"
-      },
-      "group": "build"
-    },
-    {
-      "type": "shell",
       "command": "npm run watch",
       "problemMatcher": {
         "owner": "esbuild",
@@ -37,17 +24,16 @@
       "isBackground": true,
       "label": "npm: watch",
       "options": {
-        "cwd": "${workspaceFolder}/vscode-extension"
+        "cwd": "${workspaceFolder}/code/vscode-extension"
       },
       "presentation": {
         "reveal": "never"
       },
-      "group": "build",
-      "dependsOn": "npm: bundle-server"
+      "group": "build"
     },
     {
       "label": "npm: watch-all",
-      "dependsOn": ["npm: bundle-server", "npm: watch"],
+      "dependsOn": ["npm: watch"],
       "dependsOrder": "sequence",
       "group": {
         "kind": "build",

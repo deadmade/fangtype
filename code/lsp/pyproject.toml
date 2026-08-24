@@ -1,0 +1,251 @@
+[project]
+name = "fangtype"
+version = "0.5.11"
+description = "Python automatic type inference tool"
+authors = [{ name = "deadmade" }]
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+  "pygls==2.1.1",
+  "libcst==1.8.6",
+  "mypy==2.1.0",
+  "jedi==0.20.0",
+  "injector==0.24.0",
+]
+
+[project.scripts]
+fangtype-server = "fangtype.server:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=9.0.0",
+  "pytest-cov>=7.0.0",
+  "pytest-asyncio>=1.3.0",
+  "pytest-mock>=3.15.1",
+  "pytest-mypy",
+  "vulture",
+  "hatchling",
+  "ruff",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+  "--strict-markers",
+  "--strict-config",
+  "--cov=fangtype",
+  "--cov-report=term-missing",
+  "--cov-report=html",
+]
+norecursedirs = [
+  ".direnv",
+  ".gitlab-ci-local",
+  "vscode-extension",
+  "benchmark",
+  "benchmark/data",
+]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = [
+  "benchmark/data/",
+  "src/test/fixtures/",
+  "../../vscode-extension/src/test/fixtures/large-test-files/",
+  "**/../../vscode-extension/src/test/fixtures/large-test-files/*.py",
+]
+
+[tool.ruff.lint]
+select = [
+  "E",   # pycodestyle errors
+  "W",   # pycodestyle warnings
+  "F",   # pyflakes
+  "I",   # isort
+  "UP",  # pyupgrade
+  "B",   # flake8-bugbear
+  "C4",  # flake8-comprehensions
+  "SIM", # flake8-simplify
+  "TCH", # flake8-type-checking
+  "PTH", # flake8-use-pathlib
+  "RUF", # ruff-specific rules
+]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+  "S101", # Allow assert in tests
+]
+"src/fangtype/server.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_untyped_globals = true
+disallow_any_unimported = false
+disallow_any_explicit = true
+disallow_any_generics = true
+disallow_any_expr = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+check_untyped_defs = true
+strict_equality = true
+enable_error_code = ["var-annotated"]
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+disallow_subclassing_any = true
+warn_unreachable = true
+no_implicit_reexport = true
+extra_checks = true
+exclude = [
+  "^benchmark/data/*",
+  "^benchmark/tmp/",
+  "^code/vscode-extension/",
+  "^../vscode-extension/test/fixtures/",
+  ".*/test/fixtures/.*",
+]
+
+# tests.*: constructs MagicMock/Mock doubles and consumes raw JSON / LSP-dict / stub-less-Jedi
+# payloads — the same irreducible-Any boundary as the benchmark.* / fangtype.server / jedi.*
+# blocks above. The three disallow_any_* bans plus disallow_incomplete_defs are off here for
+# that boundary; reducible errors in the tests' own logic are fixed in code, not config.
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_untyped_globals = false
+ignore_missing_imports = true
+disallow_subclassing_any = false
+disallow_untyped_decorators = false
+warn_return_any = false
+disallow_incomplete_defs = false
+disallow_any_expr = false
+disallow_any_explicit = false
+disallow_any_generics = false
+disable_error_code = ["type-abstract", "attr-defined"]
+
+[[tool.mypy.overrides]]
+module = ["jedi", "jedi.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["pytest", "pytest.*"]
+ignore_missing_imports = true
+
+# fangtype.server: LSP transport boundary. pygls async @server.feature handler decorators
+# and injector Protocol DI (injector.get() on @runtime_checkable Protocols) resolve to Any,
+# so the three disallow_any_* bans are off here; the injector.get() Protocol pattern also
+# trips type-abstract. The real logic lives in workflow.py (now fully strict).
+[[tool.mypy.overrides]]
+module = ["fangtype.server"]
+disallow_untyped_decorators = false
+warn_return_any = false
+disallow_any_expr = false
+disallow_any_explicit = false
+disallow_any_generics = false
+disable_error_code = ["type-abstract", "import-untyped", "unreachable"]
+
+# Files using external libraries with injector DI
+[[tool.mypy.overrides]]
+module = [
+  "fangtype",
+  "fangtype.*",
+  "libcst",
+  "libcst.*",
+  "lsprotocol",
+  "lsprotocol.*",
+  "pygls",
+  "pygls.*",
+  "injector",
+  "injector.*",
+]
+ignore_missing_imports = true
+
+# Files that use external libraries with ignored imports - allow subclassing Any
+[[tool.mypy.overrides]]
+module = "fangtype.insertion.*"
+disallow_subclassing_any = false
+
+# Files that use injector dependency injection
+[[tool.mypy.overrides]]
+module = "fangtype.container"
+disallow_subclassing_any = false
+disallow_untyped_decorators = false
+
+# Utility modules with decorators
+[[tool.mypy.overrides]]
+module = ["fangtype.utils.*", "fangtype.diagnostics.*"]
+disallow_untyped_decorators = false
+
+# Jedi-driven inference passes: consume jedi.Script directly (script.infer/goto/get_names/
+# get_references, jedi.Script(...)) and its stub-less results (definition.name/.type,
+# class_value.defined_names(), member.get_type_hint()). jedi ships no type stubs, so every
+# such access is irreducibly Any — same class as the fangtype.inference.jedi.* block below.
+# Tightening would require cast-spam over ~80 Jedi accesses (or a fabricated Protocol mirroring
+# jedi's unstable API); declined. Our own classes (Scope/ScopeTree/TypeInfo) are already typed.
+[[tool.mypy.overrides]]
+module = [
+  "fangtype.inference.contract_propagation",
+  "fangtype.inference.override_inference",
+]
+disallow_any_expr = false
+disallow_any_explicit = false
+disallow_any_generics = false
+disable_error_code = ["unreachable"]
+
+# fangtype.inference.jedi.*: jedi ships no type stubs (ignore_missing_imports), so jedi.Script
+# and every inference result is Any — the three disallow_any_* bans are off here for that
+# irreducible boundary. (The engine-facing wrappers stay behind our typed InferenceResult.)
+[[tool.mypy.overrides]]
+module = ["fangtype.inference.jedi.*"]
+ignore_missing_imports = true
+disallow_any_expr = false
+disallow_any_explicit = false
+disallow_any_generics = false
+disable_error_code = ["import-untyped", "unreachable"]
+
+# benchmark.*: drives pygls over stdio and consumes stub-less Jedi/LSP-dict payloads —
+# the same irreducible-Any boundary class as fangtype.server / fangtype.inference.jedi.* /
+# jedi.* above. The three disallow_any_* bans plus the related decorator/return/incomplete-def
+# checks are off here for that boundary; our own logic types stay strict and reducible errors
+# are fixed in code, not config.
+[[tool.mypy.overrides]]
+module = ["benchmark.*"]
+disable_error_code = ["type-abstract", "attr-defined"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_any_expr = false
+disallow_any_explicit = false
+disallow_any_generics = false
+warn_return_any = false
+disallow_untyped_decorators = false
+
+# Vendored TypeEvalPy submodule modules (result_analyzer scorer, jedi_type_inference reference),
+# importable only at benchmark runtime after the data/TypeEvalPy submodule is checked out.
+[[tool.mypy.overrides]]
+module = ["result_analyzer", "result_analyzer.*", "jedi_type_inference"]
+ignore_missing_imports = true
+
+# thesis/evaluation/generate_tables.py: outside this package entirely, reached at test
+# runtime the same way (a sys.path insert plus a plain import), so mypy cannot follow it
+# statically and the whole module resolves to Any. See test_generate_tables_gate.py.
+[[tool.mypy.overrides]]
+module = ["generate_tables"]
+ignore_missing_imports = true
+
+[tool.isort]
+profile = "black"
+line_length = 100

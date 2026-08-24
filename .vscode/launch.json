@@ -7,10 +7,40 @@
       "request": "launch",
       "runtimeExecutable": "${execPath}",
       "args": [
-        "--extensionDevelopmentPath=${workspaceFolder}/vscode-extension"
+        "--extensionDevelopmentPath=${workspaceFolder}/code/vscode-extension"
       ],
-      "outFiles": ["${workspaceFolder}/vscode-extension/dist/**/*.cjs"],
+      "outFiles": ["${workspaceFolder}/code/vscode-extension/dist/**/*.cjs"],
       "preLaunchTask": "npm: watch-all"
+    },
+    {
+      "name": "Debug Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "runtimeExecutable": "${execPath}",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/code/vscode-extension"
+      ],
+      "outFiles": ["${workspaceFolder}/code/vscode-extension/dist/**/*.cjs"],
+      "preLaunchTask": "npm: watch-all",
+      "env": {
+        "DEBUG_FANGTYPE": "1",
+        "DEBUG_FANGTYPE_WAIT": "1"
+      }
+    },
+    {
+      "name": "Python: Attach to Fangtype Server",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": {
+        "host": "localhost",
+        "port": 5678
+      }
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Debug Extension + Python",
+      "configurations": ["Debug Extension", "Python: Attach to Fangtype Server"]
     }
   ]
 }

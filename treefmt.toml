@@ -9,9 +9,9 @@ command = "prettier"
 options = ["--write"]
 includes = ["*.json", "*.yaml", "*.yml", "*.js", "*.ts"]
 excludes = [
-  "vscode-extension/node_modules/",
-  "vscode-extension/dist/",
-  "vscode-extension/out/",
+  "code/vscode-extension/node_modules/",
+  "code/vscode-extension/dist/",
+  "code/vscode-extension/out/",
   "flake.lock",
 ]
 
