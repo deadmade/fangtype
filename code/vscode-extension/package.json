@@ -2,7 +2,7 @@
     "name": "fangtype",
     "displayName": "Fangtype",
     "description": "Interactive Python type annotation with ghost text",
-    "version": "0.5.11",
+    "version": "0.5.12",
     "publisher": "fangtype",
     "author": "deadmade",
     "license": "MIT",
@@ -146,12 +146,7 @@
                 "fangtype.mypyEnabled": {
                     "type": "boolean",
                     "default": true,
-                    "description": "Whether to run mypy validation for diagnostics."
-                },
-                "fangtype.mypyInferenceValidationEnabled": {
-                    "type": "boolean",
-                    "default": false,
-                    "description": "Whether to run mypy validation for inference-result validation (e.g., inlay hints)."
+                    "description": "Run mypy. Turning this off also disables the assignability gate, so inferred annotations are written without being checked against the values they stand over."
                 },
                 "fangtype.crossFileContractsEnabled": {
                     "type": "boolean",

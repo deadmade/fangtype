@@ -68,7 +68,6 @@ def mock_type_validator() -> MagicMock:
     mock = create_autospec(TypeValidatorProtocol, instance=True)
 
     # Set up default return values
-    mock.validate_bulk.return_value = {}
     mock.validate_file_full.return_value = []
 
     return mock

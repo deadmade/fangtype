@@ -11,7 +11,6 @@ import pytest
 from fangtype.utils.settings import Settings
 from fangtype.validation import MypyTypeValidator
 from fangtype.validation.mypy_runner import MypyRunner
-from fangtype.validation.mypy_validator import TypeValidationResult
 
 
 @pytest.fixture
@@ -22,161 +21,9 @@ def validator():
     validator.close()
 
 
-async def _validate_single(validator: MypyTypeValidator, type_str: str, source: str) -> bool:
-    """Validate one type via the bulk validator API."""
-    result = await validator.validate_bulk({"_single": type_str}, source)
-    single_result = result.get("_single")
-    return bool(single_result and single_result.is_valid)
-
-
 _PROTOCOL_SRC = (
     "from typing import Protocol\n\n\nclass MyProtocol(Protocol):\n    def m(self) -> int: ...\n"
 )
-
-
-@pytest.mark.parametrize(
-    ("source", "type_str"),
-    [
-        pytest.param("", "int", id="builtin_int"),
-        pytest.param("", "None", id="builtin_none"),
-        pytest.param("", "list[int]", id="modern_generic"),
-        pytest.param("", "tuple[int, str]", id="modern_tuple"),
-        pytest.param("", "dict[str, list[int]]", id="complex_nested_generic"),
-        pytest.param("", "int | str", id="pep604_union"),
-        pytest.param("", "list[int] | None", id="pep604_optional_union"),
-        pytest.param(
-            "from typing import List, Dict, Optional, Union", "Optional[str]", id="typing_optional"
-        ),
-        pytest.param(
-            "from typing import List, Dict, Optional, Union", "Union[int, str]", id="typing_union"
-        ),
-        pytest.param("from typing import Callable", "Callable[[int], str]", id="callable"),
-        pytest.param("from typing import Literal", "Literal[1, 2, 3]", id="literal"),
-        pytest.param(_PROTOCOL_SRC, "MyProtocol", id="protocol_subclass"),
-    ],
-)
-async def test_validate_accepts_valid_type(validator, source: str, type_str: str):
-    """A well-formed type valid in the given source context passes validation."""
-    assert await _validate_single(validator, type_str, source) is True
-
-
-async def test_reject_unknown_type(validator):
-    """Test rejection of undefined types."""
-    source = ""
-    assert await _validate_single(validator, "UnknownType", source) is False
-    assert await _validate_single(validator, "MyClass", source) is False
-
-
-async def test_validate_with_custom_class(validator):
-    """Test validation with custom class in source."""
-    source = """
-class MyClass:
-    pass
-
-class DataProcessor:
-    pass
-"""
-    assert await _validate_single(validator, "MyClass", source) is True
-    assert await _validate_single(validator, "DataProcessor", source) is True
-    assert await _validate_single(validator, "UnknownClass", source) is False
-
-
-async def test_validate_with_imports_and_aliases(validator):
-    """Test validation respects imports and aliases."""
-    source = """
-from typing import List as L, Dict as D
-"""
-    assert await _validate_single(validator, "L[int]", source) is True
-    assert await _validate_single(validator, "D[str, int]", source) is True
-
-
-async def test_validate_rejects_unknown(validator):
-    """Test that 'Unknown' is rejected."""
-    source = ""
-    assert await _validate_single(validator, "Unknown", source) is False
-
-
-async def test_validate_bulk_returns_all_with_validation_status(validator):
-    """Test bulk validation returns all types with validation status."""
-    source = """
-class MyClass:
-    pass
-"""
-    types_map = {
-        "x": "int",
-        "y": "MyClass",
-        "z": "UnknownType",
-        "w": "list[int]",
-        "v": "dict[str, InvalidType]",
-    }
-    validated = await validator.validate_bulk(types_map, source)
-
-    # All types should be returned
-    assert "x" in validated
-    assert "y" in validated
-    assert "z" in validated
-    assert "w" in validated
-    assert "v" in validated
-
-    # Check validation status
-    assert validated["x"].is_valid is True
-    assert validated["y"].is_valid is True
-    assert validated["w"].is_valid is True
-    assert validated["z"].is_valid is False  # Invalid type
-    assert validated["v"].is_valid is False  # Invalid type
-
-    # Check type strings are preserved
-    assert validated["x"].type_str == "int"
-    assert validated["z"].type_str == "UnknownType"
-
-
-async def test_validate_bulk_all_valid(validator):
-    """Test bulk validation when all types are valid."""
-    source = ""
-    types_map = {
-        "x": "int",
-        "y": "str",
-        "z": "list[int]",
-    }
-    validated = await validator.validate_bulk(types_map, source)
-
-    assert len(validated) == 3
-    # Check all are valid MypyDiagnostic objects
-    assert validated["x"].is_valid is True
-    assert validated["x"].type_str == "int"
-    assert validated["y"].is_valid is True
-    assert validated["y"].type_str == "str"
-    assert validated["z"].is_valid is True
-    assert validated["z"].type_str == "list[int]"
-
-
-async def test_validate_bulk_empty(validator):
-    """Test bulk validation with empty input."""
-    source = ""
-    types_map: dict[str, str] = {}
-    validated = await validator.validate_bulk(types_map, source)
-
-    assert validated == {}
-
-
-async def test_validate_with_syntax_errors_in_source(validator):
-    """A syntax error in the surrounding source must not invalidate the annotation under test."""
-    source = "import "  # Syntax error
-
-    # The mypy diagnostic lands on the broken source line, not the appended annotation line,
-    # so the type itself is still judged valid (graceful handling, no raise).
-    result = await _validate_single(validator, "int", source)
-    assert result is True
-
-
-def test_validate_bulk_fails_open_when_mypy_crashes(validator):
-    """L24: a mypy crash (non-zero exit, empty stdout) must not mark every type invalid."""
-    types_map = {"x": "int", "y": "NotARealType"}
-
-    with patch.object(validator, "_run_mypy_sync", return_value=("", "Traceback: boom", 2)):
-        results = validator._validate_bulk_sync(types_map, "x = 1\n")
-
-    assert {key: r.is_valid for key, r in results.items()} == {"x": True, "y": True}
 
 
 async def test_validate_file_full_no_errors(validator):
@@ -304,38 +151,6 @@ async def test_validate_file_full_empty_source(validator):
     assert len(diagnostics) == 0
 
 
-async def test_validate_bulk_with_dotted_keys(validator):
-    """Test validate_bulk() sanitizes dotted keys (e.g. module.var.x) so mypy accepts them."""
-    types_map = {
-        "module.var.x": "int",
-        "module.var.name": "str",
-        "func1.param.value": "float",
-        "func1.return": "bool",
-        "nested.scope.var.items": "list[int]",
-    }
-
-    source = ""
-
-    result = await validator.validate_bulk(types_map, source)
-
-    # All keys should be present with MypyDiagnostic objects
-    assert "module.var.x" in result
-    assert result["module.var.x"].is_valid is True
-    assert result["module.var.x"].type_str == "int"
-    assert "module.var.name" in result
-    assert result["module.var.name"].is_valid is True
-    assert result["module.var.name"].type_str == "str"
-    assert "func1.param.value" in result
-    assert result["func1.param.value"].is_valid is True
-    assert result["func1.param.value"].type_str == "float"
-    assert "func1.return" in result
-    assert result["func1.return"].is_valid is True
-    assert result["func1.return"].type_str == "bool"
-    assert "nested.scope.var.items" in result
-    assert result["nested.scope.var.items"].is_valid is True
-    assert result["nested.scope.var.items"].type_str == "list[int]"
-
-
 async def test_validate_file_full_offloads_only_mypy_run(validator):
     """Test validate_file_full wraps only mypy execution in asyncio.to_thread."""
     source = "x: int = 1"
@@ -356,30 +171,6 @@ async def test_validate_file_full_offloads_only_mypy_run(validator):
     assert called_args == source
 
 
-async def test_validate_bulk_offloads_only_mypy_run(validator):
-    """Test validate_bulk wraps only mypy execution in asyncio.to_thread."""
-    source = ""
-    types_map = {"x": "int"}
-
-    with patch(
-        "fangtype.validation.mypy_validator.asyncio.to_thread",
-        new_callable=AsyncMock,
-    ) as mock_to_thread:
-        mock_to_thread.return_value = {"x": TypeValidationResult(type_str="int", is_valid=True)}
-
-        result = await validator.validate_bulk(types_map, source)
-
-    assert "x" in result
-    assert result["x"].is_valid is True
-    mock_to_thread.assert_awaited_once()
-    assert mock_to_thread.await_args is not None
-    called_callable, types_arg, source_arg, hints_arg = mock_to_thread.await_args.args
-    assert called_callable.__func__ is validator._validate_bulk_sync.__func__
-    assert types_arg == types_map
-    assert source_arg == source
-    assert hints_arg is None
-
-
 async def test_validate_file_full_reraises_cancelled_error(validator):
     """CancelledError must propagate so server cancellation branches stay live."""
     with patch(
@@ -390,18 +181,6 @@ async def test_validate_file_full_reraises_cancelled_error(validator):
 
         with pytest.raises(asyncio.CancelledError):
             await validator.validate_file_full("x = 1\n")
-
-
-async def test_validate_bulk_reraises_cancelled_error(validator):
-    """CancelledError must propagate so a cancel is not recorded as all-invalid."""
-    with patch(
-        "fangtype.validation.mypy_validator.asyncio.to_thread",
-        new_callable=AsyncMock,
-    ) as mock_to_thread:
-        mock_to_thread.side_effect = asyncio.CancelledError
-
-        with pytest.raises(asyncio.CancelledError):
-            await validator.validate_bulk({"x": "int"}, "x = 1\n")
 
 
 def test_close_terminates_the_runner_and_is_idempotent():
@@ -482,11 +261,11 @@ def test_parse_mypy_output_ignores_foreign_file_line():
     assert diagnostics == []
 
 
-def test_parse_mypy_output_bulk_path_not_spoofed_by_foreign_line():
-    """Regression #14 bulk guard: foreign diagnostic dropped even if line matches a probe line."""
+def test_parse_mypy_output_not_spoofed_by_foreign_line():
+    """Regression #14: a followed project file's diagnostic is dropped, only `<string>` survives."""
     validator = MypyTypeValidator(Settings())
     try:
-        # A followed project file errors on line 7, coinciding with a probe line in bulk validation.
+        # A followed project file errors on line 7, coinciding with a real line in the checked file.
         output = (
             "utils.py:7: error: Incompatible types in assignment  [assignment]\n"
             "<string>:7: error: Incompatible types in assignment  [assignment]"
@@ -575,16 +354,16 @@ class TestProjectImports:
         settings.update_launch_context({"projectRoot": str(tmp_path)})
         validator = MypyTypeValidator(settings)
         try:
-            results = await validator.validate_bulk(
-                {"good": "Widget", "bad": "Widget[int]", "junk": "Nonsense"}, source
-            )
+            good = await validator.validate_file_full(source + "good: Widget\n")
+            bad = await validator.validate_file_full(source + "bad: Widget[int]\n")
+            junk = await validator.validate_file_full(source + "junk: Nonsense\n")
         finally:
             validator.close()
 
-        assert results["good"].is_valid, "a real project type must validate"
+        assert not good, "a real project type must validate"
         # Widget[int] is only catchable if mypy actually resolved Widget rather than seeing Any.
-        assert not results["bad"].is_valid, "project import was not followed (resolved as Any)"
-        assert not results["junk"].is_valid
+        assert bad, "project import was not followed (resolved as Any)"
+        assert junk
 
     async def test_project_import_is_not_reported_as_a_diagnostic(self, tmp_path, monkeypatch):
         """Importing a project module must not raise import-not-found on the user's own file."""

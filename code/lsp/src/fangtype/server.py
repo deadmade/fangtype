@@ -38,7 +38,6 @@ from fangtype.protocols import (
     DiagnosticEngineProtocol,
     TypeValidatorProtocol,
 )
-from fangtype.validation.mypy_validator import TypeValidationResult  # noqa: TC001
 from fangtype.workflow import TypeAnnotationWorkflow
 
 _LOG_LEVEL = getattr(
@@ -70,14 +69,11 @@ def _build_declaration_hints(
     helper: InlayHintHelper,
     inference_result: InferenceResult,
     source: str,
-    validation_results: dict[str, TypeValidationResult] | None,
 ) -> list[types.InlayHint]:
-    """Declaration-site inlay hints from the pre-validated types, across all scopes."""
+    """Declaration-site inlay hints for every inferred type, across all scopes."""
     hints: list[types.InlayHint] = []
-    for scope_id, scope_obj in inference_result.scope_tree.scopes_by_id.items():
-        hints.extend(
-            helper.generate_hints_for_scope(scope_obj, source, validation_results, scope_id)
-        )
+    for scope_obj in inference_result.scope_tree.scopes_by_id.values():
+        hints.extend(helper.generate_hints_for_scope(scope_obj, source))
     return hints
 
 
@@ -224,8 +220,8 @@ class FangtypeServer(LanguageServer):
             inlay_hint_helper = self.inlay_hints_helper
 
             try:
-                # 1. Infer + validate all types (off-thread, in the workflow).
-                inference_result, validation_results = await workflow.collect_and_validate_types(
+                # 1. Infer all types (off-thread, in the workflow).
+                inference_result = await workflow.collect_types(
                     source,
                     file_path,
                     cancel_token=cancel_token,
@@ -234,7 +230,7 @@ class FangtypeServer(LanguageServer):
                 )
                 # 2. Declaration-site hints (LSP InlayHint objects built here, server-side).
                 hints: list[types.InlayHint] = _build_declaration_hints(
-                    inlay_hint_helper, inference_result, source, validation_results
+                    inlay_hint_helper, inference_result, source
                 )
                 # 3. Usage-site hints across the requested range.
                 hints.extend(

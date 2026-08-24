@@ -10,11 +10,11 @@ from fangtype.insertion.types import TargetType
 from fangtype.utils.document_cache import DocumentCache
 from fangtype.utils.settings import Settings
 from fangtype.validation.mypy_validator import TypeValidationResult
-from fangtype.workflow import TypeAnnotationWorkflow
+from fangtype.workflow import TypeAnnotationWorkflow, _select_most_recent_variables
 
 
 def _validation_result(type_str: str, is_valid: bool) -> TypeValidationResult:
-    """Build a validation result (mirrors validate_bulk's TypeValidationResult) for mocked tests."""
+    """Build a TypeValidationResult for mocked tests."""
     return TypeValidationResult(
         type_str=type_str,
         is_valid=is_valid,
@@ -137,7 +137,6 @@ class TestInsertAllTypes:
         bare_insertion_engine: MagicMock,
     ) -> None:
         """With mypy validation disabled, insert skips the validator; every variable passes."""
-        workflow._settings.mypy_inference_validation_enabled = False
 
         mock_inference_result = MagicMock()
         mock_inference_result.get_variable_insertion_candidates.return_value = {
@@ -183,240 +182,6 @@ class TestInsertAllTypes:
         assert drop_reasons == {}
         assert "No types to insert" in msg
         bare_insertion_engine.insert_types_bulk.assert_not_called()
-
-    async def test_insert_all_types_validation_fail(
-        self,
-        workflow: TypeAnnotationWorkflow,
-        bare_inference_engine: MagicMock,
-        bare_type_validator: MagicMock,
-        bare_insertion_engine: MagicMock,
-    ) -> None:
-        """Test when all types fail validation."""
-        workflow._settings.mypy_inference_validation_enabled = True
-        mock_inference_result = MagicMock()
-        mock_inference_result.get_variable_insertion_candidates.return_value = {
-            ("module", "x"): [(0, "int")]
-        }
-        mock_inference_result.get_function_insertions.return_value = {}
-        mock_inference_result.get_attribute_insertions.return_value = {}
-        bare_inference_engine.infer_types.return_value = mock_inference_result
-
-        bare_type_validator.validate_bulk.return_value = {}
-
-        _source, vars_cnt, _funcs_cnt, msg = await workflow.insert_all_types("source", "file.py")
-
-        assert vars_cnt == 0
-        assert "No types inserted" in msg or "No valid types" in msg
-        bare_insertion_engine.insert.assert_not_called()
-
-    async def test_insert_all_types_drops_invalid_types(
-        self,
-        workflow: TypeAnnotationWorkflow,
-        bare_inference_engine: MagicMock,
-        bare_type_validator: MagicMock,
-        bare_insertion_engine: MagicMock,
-    ) -> None:
-        """A variable whose type mypy rejects (is_valid False) is filtered out, not inserted."""
-        workflow._settings.mypy_inference_validation_enabled = True
-        source = "x = 1\ny = something()\n"
-        mock_inference_result = MagicMock()
-        mock_inference_result.get_variable_insertion_candidates.return_value = {
-            ("module", "x"): [(0, "int")],
-            ("module", "y"): [(1, "Bogus")],
-        }
-        mock_inference_result.get_function_insertions.return_value = {}
-        mock_inference_result.get_attribute_insertions.return_value = {}
-        bare_inference_engine.infer_types.return_value = mock_inference_result
-
-        bare_type_validator.validate_bulk.return_value = {
-            (0, "x"): _validation_result("int", True),
-            (1, "y"): _validation_result("Bogus", False),
-        }
-
-        from fangtype.insertion.types import InsertionResult
-
-        bare_insertion_engine.insert.return_value = InsertionResult(
-            success=True,
-            modified_source=source,
-            inserted_count=1,
-            error_message=None,
-            details={},
-            failed_targets=[],
-        )
-
-        _source, var_count, _func_count, _msg = await workflow.insert_all_types(source, "file.py")
-
-        assert var_count == 1
-        bare_insertion_engine.insert.assert_called_once()
-        targets = bare_insertion_engine.insert.call_args.args[0]
-        assert [t.name for t in targets] == ["x"]
-        assert all(t.type_annotation != "Bogus" for t in targets)
-
-    async def test_insert_all_types_all_invalid_reports_failure(
-        self,
-        workflow: TypeAnnotationWorkflow,
-        bare_inference_engine: MagicMock,
-        bare_type_validator: MagicMock,
-        bare_insertion_engine: MagicMock,
-    ) -> None:
-        """When every inferred variable fails mypy (all-invalid dict), nothing is inserted."""
-        workflow._settings.mypy_inference_validation_enabled = True
-        mock_inference_result = MagicMock()
-        mock_inference_result.get_variable_insertion_candidates.return_value = {
-            ("module", "x"): [(0, "Bogus")]
-        }
-        mock_inference_result.get_function_insertions.return_value = {}
-        mock_inference_result.get_attribute_insertions.return_value = {}
-        bare_inference_engine.infer_types.return_value = mock_inference_result
-
-        bare_type_validator.validate_bulk.return_value = {
-            (0, "x"): _validation_result("Bogus", False),
-        }
-
-        _source, var_count, _func_count, msg = await workflow.insert_all_types("source", "file.py")
-
-        assert var_count == 0
-        assert "failed validation" in msg
-        bare_insertion_engine.insert.assert_not_called()
-
-    async def test_insert_all_types_drops_invalid_attribute(
-        self,
-        workflow: TypeAnnotationWorkflow,
-        bare_inference_engine: MagicMock,
-        bare_type_validator: MagicMock,
-        bare_insertion_engine: MagicMock,
-    ) -> None:
-        """An attribute whose type mypy rejects is filtered on is_valid, like variables."""
-        workflow._settings.mypy_inference_validation_enabled = True
-        source = (
-            "class C:\n"
-            "    def __init__(self, width, height):\n"
-            "        self.width = width\n"
-            "        self.height = height\n"
-        )
-        mock_inference_result = MagicMock()
-        mock_inference_result.get_variable_insertion_candidates.return_value = {}
-        mock_inference_result.get_function_insertions.return_value = {}
-        # Attribute keys are 1-based; ``self`` attrs are stored under their bare name.
-        mock_inference_result.get_attribute_insertions.return_value = {
-            (3, "width"): "int",
-            (4, "height"): "Bogus",
-        }
-        bare_inference_engine.infer_types.return_value = mock_inference_result
-
-        bare_type_validator.validate_bulk.side_effect = _validate_bulk_reject_bogus
-
-        from fangtype.insertion.types import InsertionResult
-
-        bare_insertion_engine.insert.return_value = InsertionResult(
-            success=True,
-            modified_source=source,
-            inserted_count=1,
-            error_message=None,
-            details={},
-            failed_targets=[],
-        )
-
-        await workflow.insert_all_types(source, "file.py")
-
-        bare_insertion_engine.insert.assert_called_once()
-        targets = bare_insertion_engine.insert.call_args.args[0]
-        names = [t.name for t in targets]
-        assert "self.width" in names
-        assert "self.height" not in names
-        assert all(t.type_annotation != "Bogus" for t in targets)
-
-    async def test_insert_all_types_drops_invalid_function_annotations_per_annotation(
-        self,
-        workflow: TypeAnnotationWorkflow,
-        bare_inference_engine: MagicMock,
-        bare_type_validator: MagicMock,
-        bare_insertion_engine: MagicMock,
-    ) -> None:
-        """A function keeps its valid param (a: int) even when a sibling param/return is invalid."""
-        workflow._settings.mypy_inference_validation_enabled = True
-        source = "def f(a, b):\n    return a\n"
-        mock_inference_result = MagicMock()
-        mock_inference_result.get_variable_insertion_candidates.return_value = {}
-        mock_inference_result.get_attribute_insertions.return_value = {}
-        func_info: FunctionInsertionInfo = {
-            "name": "f",
-            "params": {"a": "int", "b": "Bogus"},
-            "return_type": "Bogus",
-        }
-        mock_inference_result.get_function_insertions.return_value = {(0, "f"): func_info}
-        bare_inference_engine.infer_types.return_value = mock_inference_result
-
-        bare_type_validator.validate_bulk.side_effect = _validate_bulk_reject_bogus
-
-        from fangtype.insertion.types import InsertionResult
-
-        bare_insertion_engine.insert.return_value = InsertionResult(
-            success=True,
-            modified_source=source,
-            inserted_count=1,
-            error_message=None,
-            details={},
-            failed_targets=[],
-        )
-
-        await workflow.insert_all_types(source, "file.py")
-
-        bare_insertion_engine.insert.assert_called_once()
-        targets = bare_insertion_engine.insert.call_args.args[0]
-        assert [(t.name, t.target_type, t.type_annotation) for t in targets] == [
-            ("a", TargetType.FUNCTION_PARAMETER, "int")
-        ]
-        assert all(t.target_type != TargetType.FUNCTION_RETURN for t in targets)
-        assert all(t.type_annotation != "Bogus" for t in targets)
-
-    async def test_insert_all_types_drops_wholly_invalid_function(
-        self,
-        workflow: TypeAnnotationWorkflow,
-        bare_inference_engine: MagicMock,
-        bare_type_validator: MagicMock,
-        bare_insertion_engine: MagicMock,
-    ) -> None:
-        """A function with every annotation invalid disappears via the all-failed early exit."""
-        workflow._settings.mypy_inference_validation_enabled = True
-        source = "def f(a):\n    return a\n"
-        mock_inference_result = MagicMock()
-        mock_inference_result.get_variable_insertion_candidates.return_value = {}
-        mock_inference_result.get_attribute_insertions.return_value = {}
-        func_info: FunctionInsertionInfo = {
-            "name": "f",
-            "params": {"a": "Bogus"},
-            "return_type": "Bogus",
-        }
-        mock_inference_result.get_function_insertions.return_value = {(0, "f"): func_info}
-        bare_inference_engine.infer_types.return_value = mock_inference_result
-
-        bare_type_validator.validate_bulk.side_effect = _validate_bulk_reject_bogus
-
-        _source, var_count, drop_reasons, msg = await workflow.insert_all_types(source, "file.py")
-
-        assert var_count == 0
-        assert drop_reasons == {}  # no variable candidates -> no drop-reason buckets
-        assert "failed validation" in msg
-        bare_insertion_engine.insert.assert_not_called()
-
-    async def test_validate_function_insertions_empty_validated_returns_empty(
-        self,
-        workflow: TypeAnnotationWorkflow,
-        bare_type_validator: MagicMock,
-    ) -> None:
-        """An empty validated dict must short-circuit to {} without raising KeyError."""
-        bare_type_validator.validate_bulk.return_value = {}
-        func_info: FunctionInsertionInfo = {
-            "name": "f",
-            "params": {"a": "int"},
-            "return_type": "str",
-        }
-        function_insertions = {(0, "f"): func_info}
-
-        result = await workflow._validate_function_insertions(function_insertions, "source")
-
-        assert result == {}
 
     async def test_insert_all_types_attribute_only_success_counts_as_inserted(
         self,
@@ -548,130 +313,34 @@ class TestVariableDropReasons:
             "all_mypy_invalid": 1,
         }
 
-    def test_empty_candidates_returns_empty(self) -> None:
-        assert workflow_module._bucket_variable_drop_reasons({}, {}) == {}
 
+class TestSelectMostRecentVariables:
+    """Variable selection: the most recent binding per name wins, and nothing is judged here."""
 
-class TestSelectBestValidVariables:
-    """Best-valid binding selection: pick the most-recent mypy-valid binding per name."""
-
-    async def test_picks_most_recent_valid_binding(
-        self, workflow: TypeAnnotationWorkflow, bare_type_validator: MagicMock
-    ) -> None:
-        """Latest binding (str) is mypy-invalid → fall back to the earlier valid int."""
-        workflow._settings.mypy_inference_validation_enabled = True
-        candidates = {("module", "x"): [(2, "str"), (0, "int")]}  # most-recent-first
-        bare_type_validator.validate_bulk.return_value = {
-            (2, "x"): _validation_result("str", False),
-            (0, "x"): _validation_result("int", True),
-        }
-        selected = await workflow._select_best_valid_variables(candidates, "source")
-        assert selected == {(0, "x"): _validation_result("int", True)}
-
-    async def test_prefers_latest_when_both_valid(
-        self, workflow: TypeAnnotationWorkflow, bare_type_validator: MagicMock
-    ) -> None:
-        """Both bindings valid → keep the most-recent one (last write wins)."""
-        workflow._settings.mypy_inference_validation_enabled = True
+    def test_picks_the_most_recent_binding(self) -> None:
+        """Candidates arrive most-recent-first, so the first entry for a name is taken."""
         candidates = {("module", "x"): [(2, "str"), (0, "int")]}
-        bare_type_validator.validate_bulk.return_value = {
-            (2, "x"): _validation_result("str", True),
-            (0, "x"): _validation_result("int", True),
+        assert _select_most_recent_variables(candidates) == {
+            (2, "x"): _validation_result("str", True)
         }
-        selected = await workflow._select_best_valid_variables(candidates, "source")
-        assert selected == {(2, "x"): _validation_result("str", True)}
 
-    async def test_drops_name_when_all_bindings_invalid(
-        self, workflow: TypeAnnotationWorkflow, bare_type_validator: MagicMock
-    ) -> None:
-        """No valid binding for a name → the name is dropped entirely."""
-        workflow._settings.mypy_inference_validation_enabled = True
-        candidates = {("module", "x"): [(2, "str"), (0, "int")]}
-        bare_type_validator.validate_bulk.return_value = {
-            (2, "x"): _validation_result("str", False),
-            (0, "x"): _validation_result("int", False),
-        }
-        selected = await workflow._select_best_valid_variables(candidates, "source")
-        assert selected == {}
-
-    async def test_same_name_distinct_scopes_kept_separate(
-        self, workflow: TypeAnnotationWorkflow, bare_type_validator: MagicMock
-    ) -> None:
-        """A module ``x`` and a function ``x`` are independent — both survive."""
-        workflow._settings.mypy_inference_validation_enabled = True
+    def test_same_name_distinct_scopes_kept_separate(self) -> None:
+        """A module ``x`` and a function ``x`` are independent, so both survive."""
         candidates = {("module", "x"): [(5, "int")], ("func:f", "x"): [(10, "str")]}
-        bare_type_validator.validate_bulk.return_value = {
-            (5, "x"): _validation_result("int", True),
-            (10, "x"): _validation_result("str", True),
-        }
-        selected = await workflow._select_best_valid_variables(candidates, "source")
-        assert selected == {
+        assert _select_most_recent_variables(candidates) == {
             (5, "x"): _validation_result("int", True),
             (10, "x"): _validation_result("str", True),
         }
 
-    async def test_all_candidates_valid_when_validation_disabled(
-        self, workflow: TypeAnnotationWorkflow, bare_type_validator: MagicMock
-    ) -> None:
-        """With mypy disabled, no validator call — the most-recent binding is chosen."""
-        workflow._settings.mypy_inference_validation_enabled = False
-        candidates = {("module", "x"): [(2, "str"), (0, "int")]}
-        selected = await workflow._select_best_valid_variables(candidates, "source")
-        bare_type_validator.validate_bulk.assert_not_awaited()
-        assert selected == {(2, "x"): _validation_result("str", True)}
+    def test_empty_candidates_returns_empty(self) -> None:
+        """No candidates in, nothing out."""
+        assert _select_most_recent_variables({}) == {}
 
-    async def test_empty_candidates_returns_empty(
-        self, workflow: TypeAnnotationWorkflow, bare_type_validator: MagicMock
-    ) -> None:
-        """No candidates → no validator call, empty result."""
-        selected = await workflow._select_best_valid_variables({}, "source")
-        bare_type_validator.validate_bulk.assert_not_awaited()
-        assert selected == {}
-
-
-class TestInsertAllTypesBestValidBinding:
-    """Integration: the insert path recovers an earlier valid binding end-to-end."""
-
-    async def test_insert_uses_earlier_valid_binding_when_latest_invalid(
-        self,
-        workflow: TypeAnnotationWorkflow,
-        bare_inference_engine: MagicMock,
-        bare_type_validator: MagicMock,
-        bare_insertion_engine: MagicMock,
-    ) -> None:
-        """x is int at line 0, invalid at line 2 → insert annotates the line-0 int binding."""
-        workflow._settings.mypy_inference_validation_enabled = True
-        mock_inference_result = MagicMock()
-        mock_inference_result.get_variable_insertion_candidates.return_value = {
-            ("module", "x"): [(2, "str"), (0, "int")]
-        }
-        mock_inference_result.get_function_insertions.return_value = {}
-        mock_inference_result.get_attribute_insertions.return_value = {}
-        bare_inference_engine.infer_types.return_value = mock_inference_result
-
-        bare_type_validator.validate_bulk.return_value = {
-            (2, "x"): _validation_result("str", False),
-            (0, "x"): _validation_result("int", True),
-        }
-
-        from fangtype.insertion.types import InsertionResult
-
-        bare_insertion_engine.insert.return_value = InsertionResult(
-            success=True,
-            modified_source="modified",
-            inserted_count=1,
-            error_message=None,
-            details={},
-            failed_targets=[],
-        )
-
-        _source, var_count, _func_count, _msg = await workflow.insert_all_types(
-            "x = 1\nx = 2\nx = f()\n", "file.py"
-        )
-
-        assert var_count == 1
-        targets = bare_insertion_engine.insert.call_args.args[0]
-        assert [(t.name, t.type_annotation) for t in targets] == [("x", "int")]
+    def test_every_candidate_is_reported_valid(self) -> None:
+        """Selection judges nothing. The assignability gate is what rejects a type."""
+        candidates = {("module", "x"): [(0, "Nonsense")]}
+        selected = _select_most_recent_variables(candidates)
+        assert selected[(0, "x")].is_valid is True
 
 
 class TestBuildTargetsSelfAttribute:
@@ -752,7 +421,6 @@ class TestPreviewInsertions:
         bare_insertion_engine: MagicMock,
     ) -> None:
         """preview_insertions also skips mypy validation when disabled (benchmark scope tree)."""
-        workflow._settings.mypy_inference_validation_enabled = False
 
         mock_inference_result = MagicMock()
         mock_inference_result.get_variable_insertions.return_value = {(0, "x"): "int"}
@@ -819,64 +487,28 @@ class TestPreviewInsertions:
 
 
 class TestTypeCollection:
-    """Tests for shared type collection paths."""
+    """The inlay-path type collection entry point."""
 
-    async def test_collect_and_validate_types_uses_shared_pipeline(
+    async def test_collect_types_returns_the_inference_result_without_running_mypy(
         self,
         workflow: TypeAnnotationWorkflow,
         bare_type_validator: MagicMock,
     ) -> None:
-        """Validated collection should call validator with shared collection output."""
+        """The hint path infers and returns. No mypy runs before a hint is drawn."""
         mock_inference_result = MagicMock()
-        all_types = {"module.var.x": "int"}
-        validated = {"module.var.x": _validation_result("int", True)}
-
         mock_infer = MagicMock(return_value=mock_inference_result)
         object.__setattr__(workflow._inference_engine, "infer_types", mock_infer)
-        mock_collect = MagicMock(return_value=all_types)
-        object.__setattr__(workflow, "_collect_types_from_scopes", mock_collect)
-        workflow._settings.mypy_inference_validation_enabled = True
-        bare_type_validator.validate_bulk.return_value = validated
 
-        inference_result, validation_results = await workflow.collect_and_validate_types(
-            "source", "file.py"
-        )
+        inference_result = await workflow.collect_types("source", "file.py")
 
         assert inference_result is mock_inference_result
-        assert validation_results == validated
         mock_infer.assert_called_once_with(
             "source",
             path="file.py",
             project_root=None,
             cancel_token=None,
         )
-        mock_collect.assert_called_once_with(mock_inference_result)
-        bare_type_validator.validate_bulk.assert_awaited_once_with(all_types, "source")
-
-    async def test_collect_and_validate_types_skips_mypy_when_inference_validation_disabled(
-        self,
-        workflow: TypeAnnotationWorkflow,
-        bare_type_validator: MagicMock,
-    ) -> None:
-        """Collection should return None (unconditionally valid) when validation is disabled."""
-        mock_inference_result = MagicMock()
-        all_types = {"module.var.x": "int", "func_foo.param.y": "str"}
-
-        workflow._settings.mypy_inference_validation_enabled = False
-        object.__setattr__(
-            workflow._inference_engine, "infer_types", MagicMock(return_value=mock_inference_result)
-        )
-        object.__setattr__(
-            workflow, "_collect_types_from_scopes", MagicMock(return_value=all_types)
-        )
-
-        inference_result, validation_results = await workflow.collect_and_validate_types(
-            "source", "file.py"
-        )
-
-        assert inference_result is mock_inference_result
-        assert validation_results is None
-        bare_type_validator.validate_bulk.assert_not_awaited()
+        bare_type_validator.validate_file_full.assert_not_awaited()
 
 
 _F_PARAMS: FunctionInsertionInfo = {
@@ -1223,7 +855,6 @@ class TestAnnotateAtPositionSelfAttributeCursor:
     ) -> None:
         """Cursor on width in self.width = width succeeds end-to-end (bare key vs dotted name)."""
         # Skip the mypy round-trip -- this test is about the restriction filter, not validation.
-        workflow._settings.mypy_inference_validation_enabled = False
 
         source = "class C:\n    def __init__(self, width):\n        self.width = width\n"
 
@@ -1288,7 +919,7 @@ class TestInsertPathAssignabilityGate:
 
     async def test_wrong_type_dropped_correct_survives(self) -> None:
         """x="s" wrongly inferred int is dropped; y=3 correctly int survives (gate ON, default)."""
-        settings = Settings()  # mypy_enabled True, mypy_inference_validation_enabled False
+        settings = Settings()  # mypy_enabled True
         source = 'x = "s"\ny = 3\n'
         candidates = {("module", "x"): [(0, "int")], ("module", "y"): [(1, "int")]}
         workflow = self._workflow_real(candidates, settings)

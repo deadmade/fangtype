@@ -17,10 +17,7 @@ from fangtype.insertion import (
     find_assignment_target,
     find_variable_line,
 )
-from fangtype.protocols import (
-    InferenceEngineProtocol,
-    TypeValidatorProtocol,
-)
+from fangtype.protocols import InferenceEngineProtocol
 from fangtype.utils.document_cache import DocumentCache
 from fangtype.utils.lsp_request_helper import (
     build_full_document_workspace_edit,
@@ -45,14 +42,12 @@ class CodeActionHelper:
         self,
         inference_engine: InferenceEngineProtocol,
         insertion_engine: InsertionEngine,
-        type_validator: TypeValidatorProtocol,
         document_cache: DocumentCache,
         settings: Settings,
         workflow: TypeAnnotationWorkflow,
     ) -> None:
         self.inference_engine = inference_engine
         self.insertion_engine = insertion_engine
-        self.type_validator = type_validator
         self.document_cache = document_cache
         self.settings = settings
         self.workflow = workflow
@@ -118,21 +113,8 @@ class CodeActionHelper:
                 return []
 
             # The type may need an import (e.g. Decimal); thread its hint like the workflow does so
-            # the mypy probe resolves it and AddImportsVisitor adds the import on insert.
+            # AddImportsVisitor adds the import when the gate renders the trial insert.
             import_hint = inference_result.get_import_hints().get((start_line, var_name))
-
-            # Candidate selection, behind the same setting every workflow call site honours
-            # (default off). The bare-declaration probe cannot see the right-hand side, so the
-            # assignability gate below is what actually judges the type against its value.
-            if self.settings.mypy_inference_validation_enabled:
-                validation_result = await self.type_validator.validate_bulk(
-                    {"_single": inferred_type},
-                    source,
-                    {"_single": import_hint},
-                )
-                single_result = validation_result.get("_single")
-                if not single_result or not single_result.is_valid:
-                    return []
 
             # Insert annotation; resolve via clicked-line so a repeated name hits the clicked one.
             resolved = find_assignment_target(source, var_name, start_line)

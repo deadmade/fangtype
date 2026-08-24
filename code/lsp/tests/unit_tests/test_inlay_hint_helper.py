@@ -34,7 +34,7 @@ class TestReturnHintAnchor:
         func_scope = _function_scope(engine, source)
         helper = InlayHintHelper.__new__(InlayHintHelper)
 
-        hint = _return_hint(helper.generate_hints_for_scope(func_scope, source, None, "func:f"))
+        hint = _return_hint(helper.generate_hints_for_scope(func_scope, source))
 
         assert hint is not None
         # "def f(base)" is 11 chars; the hint belongs right after that ')', not the comment's.
@@ -46,7 +46,7 @@ class TestReturnHintAnchor:
         func_scope = _function_scope(engine, source)
         helper = InlayHintHelper.__new__(InlayHintHelper)
 
-        hint = _return_hint(helper.generate_hints_for_scope(func_scope, source, None, "func:f"))
+        hint = _return_hint(helper.generate_hints_for_scope(func_scope, source))
 
         assert hint is not None
         # The ')' closes on its own line 2, at col 0 -> anchor just after it.
@@ -61,7 +61,7 @@ class TestParamHintsSkipAllAnnotatedKinds:
         func_scope = _function_scope(engine, source)
         helper = InlayHintHelper.__new__(InlayHintHelper)  # bypass @inject constructor
 
-        hints = helper.generate_hints_for_scope(func_scope, source, None, "func:f")
+        hints = helper.generate_hints_for_scope(func_scope, source)
 
         assert _param_hint_labels(hints) == [], (
             f"expected no param hint for already-annotated kwonly 'verbose', got: {hints}"
@@ -72,7 +72,7 @@ class TestParamHintsSkipAllAnnotatedKinds:
         func_scope = _function_scope(engine, source)
         helper = InlayHintHelper.__new__(InlayHintHelper)
 
-        hints = helper.generate_hints_for_scope(func_scope, source, None, "func:f")
+        hints = helper.generate_hints_for_scope(func_scope, source)
 
         assert _param_hint_labels(hints) == [], (
             f"expected no param hint for already-annotated posonly 'x', got: {hints}"
@@ -84,7 +84,7 @@ class TestParamHintsSkipAllAnnotatedKinds:
         func_scope = _function_scope(engine, source)
         helper = InlayHintHelper.__new__(InlayHintHelper)
 
-        hints = helper.generate_hints_for_scope(func_scope, source, None, "func:f")
+        hints = helper.generate_hints_for_scope(func_scope, source)
 
         assert _param_hint_labels(hints) == [], (
             f"expected no param hint for already-annotated *args/**kwargs, got: {hints}"
@@ -96,7 +96,7 @@ class TestParamHintsSkipAllAnnotatedKinds:
         func_scope = _function_scope(engine, source)
         helper = InlayHintHelper.__new__(InlayHintHelper)
 
-        hints = helper.generate_hints_for_scope(func_scope, source, None, "func:f")
+        hints = helper.generate_hints_for_scope(func_scope, source)
 
         assert _param_hint_labels(hints) == [": int"], (
             f"expected exactly one param hint (for unannotated 'a'), got: {hints}"
@@ -113,7 +113,7 @@ class TestReceiverParamGetsNoHint:
         func_scope = _function_scope(engine, source, name="bump")
         helper = InlayHintHelper.__new__(InlayHintHelper)
 
-        hints = helper.generate_hints_for_scope(func_scope, source, None, "class:Counter.bump")
+        hints = helper.generate_hints_for_scope(func_scope, source)
 
         assert _param_hint_labels(hints) == [], (
             f"expected no param hint for the receiver 'self', got: {hints}"
@@ -131,7 +131,7 @@ class TestReceiverParamGetsNoHint:
         func_scope = _function_scope(engine, source, name="make")
         helper = InlayHintHelper.__new__(InlayHintHelper)
 
-        hints = helper.generate_hints_for_scope(func_scope, source, None, "class:Counter.make")
+        hints = helper.generate_hints_for_scope(func_scope, source)
 
         assert _param_hint_labels(hints) == [], (
             f"expected no param hint for the receiver 'cls', got: {hints}"
@@ -143,7 +143,7 @@ class TestReceiverParamGetsNoHint:
         func_scope = _function_scope(engine, source, name="add")
         helper = InlayHintHelper.__new__(InlayHintHelper)
 
-        hints = helper.generate_hints_for_scope(func_scope, source, None, "class:Counter.add")
+        hints = helper.generate_hints_for_scope(func_scope, source)
 
         assert _param_hint_labels(hints) == [": int"], (
             f"expected exactly one param hint (for 'n'), got: {hints}"
@@ -155,7 +155,7 @@ class TestReceiverParamGetsNoHint:
         func_scope = _function_scope(engine, source)
         helper = InlayHintHelper.__new__(InlayHintHelper)
 
-        hints = helper.generate_hints_for_scope(func_scope, source, None, "func:f")
+        hints = helper.generate_hints_for_scope(func_scope, source)
 
         assert _param_hint_labels(hints) == [": int"], (
             f"expected 'self' in a plain function to still be hinted, got: {hints}"

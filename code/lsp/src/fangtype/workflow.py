@@ -6,7 +6,7 @@ from collections.abc import Mapping
 
 from injector import inject
 
-from fangtype.analysis import ForwardRefContext, ScopeType, build_forward_ref_context
+from fangtype.analysis import ForwardRefContext, build_forward_ref_context
 from fangtype.analysis.name_collector import NameCollector, NameLocation
 from fangtype.analysis.types import ImportHint
 from fangtype.cancellation import CancellationToken
@@ -149,11 +149,9 @@ class TypeAnnotationWorkflow:
         trial). Each iteration that drops shrinks the survivor set strictly, so the loop converges
         in at most `len(targets)` iterations; the final clean validation is the terminating pass.
 
-        This is the value-fit safety net the bare-annotation `validate_bulk` pre-pass cannot give:
-        it checks each type against its real RHS in its real scope. Gated behind `mypy_enabled`
-        (default True), independent of `mypy_inference_validation_enabled` (which governs the inlay
-        path only). ponytail: one extra full-file mypy run per surviving drop-round — insert-path
-        only, never per-keystroke.
+        It checks each type against its real right-hand side in its real scope, which is what a
+        bare declaration cannot do. Gated behind `mypy_enabled` (default True). Cost is one extra
+        full-file mypy run per surviving drop-round.
         """
         result = self._insertion_engine.insert(targets, source)
         if not self._settings.mypy_enabled or not result.success or result.inserted_count == 0:
@@ -323,29 +321,16 @@ class TypeAnnotationWorkflow:
         """Preview which annotations would be removed (sync RemovalEngine summary)."""
         return self._removal_engine.preview_removals(source, variables, include_functions)
 
-    async def collect_and_validate_types(
+    async def collect_types(
         self,
         source: str,
         file_path: str | None,
         cancel_token: CancellationToken | None = None,
         uri: str | None = None,
         version: int | None = None,
-    ) -> tuple[InferenceResult, dict[str, TypeValidationResult] | None]:
-        """Infer, collect all-scope types, and validate (inlay path); None if mypy off."""
-        # 1. Infer types (served from the DocumentCache when the document is unchanged).
-        inference_result = await self._infer_cached(source, file_path, uri, version, cancel_token)
-
-        # 2. Collect every inferred type from all scopes.
-        all_types = self._collect_types_from_scopes(inference_result)
-
-        # 3. Validate (mypy guard — also inlined in _prepare_insertion_targets; keep in sync).
-        validated_types = (
-            await self._type_validator.validate_bulk(all_types, source)
-            if self._settings.mypy_inference_validation_enabled
-            else None
-        )
-
-        return inference_result, validated_types
+    ) -> InferenceResult:
+        """Infer every type for the inlay path, served from the DocumentCache when unchanged."""
+        return await self._infer_cached(source, file_path, uri, version, cancel_token)
 
     async def _prepare_insertion_targets(
         self,
@@ -394,34 +379,15 @@ class TypeAnnotationWorkflow:
         if not (inferred_vars or function_insertions or attribute_insertions):
             return [], 0, 0, "No types to insert (no variables, functions, or attributes found)", {}
 
-        # 3. Validate (guard inlined in collect_and_validate_types too); None = trust every type.
+        # 3. Variables: the full-file insert takes the most recent binding per name. Every
+        # candidate is trusted here; the assignability gate is what judges them against the file.
         validated_vars: dict[tuple[int, str], TypeValidationResult] | None
         drop_reasons: dict[str, int] = {}
         if best_valid:
-            validated_vars = await self._select_best_valid_variables(
-                variable_candidates, source, import_hints
-            )
+            validated_vars = _select_most_recent_variables(variable_candidates)
             drop_reasons = _bucket_variable_drop_reasons(variable_candidates, validated_vars)
         else:
-            validated_vars = (
-                await self._type_validator.validate_bulk(
-                    variable_insertions, source, import_hints=import_hints
-                )
-                if self._settings.mypy_inference_validation_enabled
-                else None
-            )
-            # validate_bulk returns every input; drop mypy-rejected so only valid types build.
-            if validated_vars is not None:
-                validated_vars = {k: v for k, v in validated_vars.items() if v.is_valid}
-
-        # Attrs/funcs validated the same (mypy-only), per-annotation: a func keeps valid parts.
-        if self._settings.mypy_inference_validation_enabled:
-            attribute_insertions = await self._validate_attribute_insertions(
-                attribute_insertions, source
-            )
-            function_insertions = await self._validate_function_insertions(
-                function_insertions, source, function_import_hints
-            )
+            validated_vars = None
 
         have_vars = variable_insertions if validated_vars is None else validated_vars
         if not (have_vars or function_insertions or attribute_insertions):
@@ -438,99 +404,6 @@ class TypeAnnotationWorkflow:
             function_import_hints,
         )
         return targets, len(have_vars), len(function_insertions), None, drop_reasons
-
-    async def _validate_attribute_insertions(
-        self, attribute_insertions: dict[tuple[int, str], str], source: str
-    ) -> dict[tuple[int, str], str]:
-        """Drop attribute insertions whose inferred type mypy rejects (empty in → empty out)."""
-        if not attribute_insertions:
-            return attribute_insertions
-        validated = await self._type_validator.validate_bulk(attribute_insertions, source)
-        return {k: attribute_insertions[k] for k, result in validated.items() if result.is_valid}
-
-    async def _validate_function_insertions(
-        self,
-        function_insertions: dict[tuple[int, str], FunctionInsertionInfo],
-        source: str,
-        import_hints: Mapping[tuple[int, str, str], ImportHint] | None = None,
-    ) -> dict[tuple[int, str], FunctionInsertionInfo]:
-        """Drop mypy-rejected function annotations per-annotation; func kept if any part valid.
-
-        The hints ride along because the probe mypy runs is the annotation against a prelude
-        built from them. Without them a synthesised ``Callable`` is probed against a source
-        that never imports it, and a correct type is rejected as an undefined name.
-        """
-        if not function_insertions:
-            return function_insertions
-
-        # Flatten to bare type strings; "return" can't collide (keyword), (line, name) is unique.
-        flat: dict[tuple[int, str, str], str] = {}
-        for (line, fname), info in function_insertions.items():
-            for param_name, param_type in info["params"].items():
-                flat[(line, fname, param_name)] = param_type
-            if info["return_type"] is not None:
-                flat[(line, fname, "return")] = info["return_type"]
-
-        validated = await self._type_validator.validate_bulk(
-            flat, source, import_hints=import_hints
-        )
-        if not validated:
-            return {}
-
-        result: dict[tuple[int, str], FunctionInsertionInfo] = {}
-        for (line, fname), info in function_insertions.items():
-            valid_params = {
-                param_name: param_type
-                for param_name, param_type in info["params"].items()
-                if validated[(line, fname, param_name)].is_valid
-            }
-            return_type = info["return_type"]
-            valid_return = (
-                return_type
-                if return_type is not None and validated[(line, fname, "return")].is_valid
-                else None
-            )
-            if valid_params or valid_return is not None:
-                result[(line, fname)] = {
-                    "name": info["name"],
-                    "params": valid_params,
-                    "return_type": valid_return,
-                }
-        return result
-
-    async def _select_best_valid_variables(
-        self,
-        candidates: dict[tuple[str, str], list[tuple[int, str]]],
-        source: str,
-        import_hints: dict[tuple[int, str], ImportHint] | None = None,
-    ) -> dict[tuple[int, str], TypeValidationResult]:
-        """Pick most-recent mypy-valid binding per name; returns {(line0, name): result}."""
-        if not candidates:
-            return {}
-
-        flat: dict[tuple[int, str], str] = {}
-        for (_scope_id, name), bindings in candidates.items():
-            for line0, type_str in bindings:
-                flat[(line0, name)] = type_str
-
-        if self._settings.mypy_inference_validation_enabled:
-            validated = await self._type_validator.validate_bulk(
-                flat, source, import_hints=import_hints
-            )
-        else:
-            validated = {
-                key: TypeValidationResult(type_str=type_str, is_valid=True)
-                for key, type_str in flat.items()
-            }
-
-        selected: dict[tuple[int, str], TypeValidationResult] = {}
-        for (_scope_id, name), bindings in candidates.items():
-            for line0, _type_str in bindings:  # most-recent-first
-                result = validated.get((line0, name))
-                if result is not None and result.is_valid:
-                    selected[(line0, name)] = result
-                    break
-        return selected
 
     def _build_targets(
         self,
@@ -704,33 +577,27 @@ class TypeAnnotationWorkflow:
             "error_message": message,
         }
 
-    def _collect_types_from_scopes(self, inference_result: InferenceResult) -> dict[str, str]:
-        """Collect every non-Unknown type from all scopes, keyed {scope_id}.{cat}.{name} (sync)."""
-        all_types: dict[str, str] = {}
-        for scope_id, scope_obj in inference_result.scope_tree.scopes_by_id.items():
-            # Collect local variables
-            for var_name, type_info in scope_obj.variables.items():
-                if type_info.type_str != "Unknown":
-                    key = f"{scope_id}.var.{var_name}"
-                    all_types[key] = type_info.type_str
-
-            # Collect function parameters and return types
-            if scope_obj.scope_type == ScopeType.FUNCTION:
-                for param_name, type_info in scope_obj.parameters.items():
-                    if type_info.type_str != "Unknown":
-                        key = f"{scope_id}.param.{param_name}"
-                        all_types[key] = type_info.type_str
-
-                if scope_obj.return_type and scope_obj.return_type.type_str != "Unknown":
-                    key = f"{scope_id}.return"
-                    all_types[key] = scope_obj.return_type.type_str
-
-        return all_types
-
 
 def _attr_key_full_name(key_name: str) -> str:
     """Self attrs are stored bare ('width'); non-self dotted ('obj.x')."""
     return key_name if "." in key_name else f"self.{key_name}"
+
+
+def _select_most_recent_variables(
+    candidates: dict[tuple[str, str], list[tuple[int, str]]],
+) -> dict[tuple[int, str], TypeValidationResult]:
+    """Take the most recent binding per name; returns {(line0, name): result}.
+
+    `candidates` lists each name's bindings most-recent-first, so the first entry wins. Every
+    candidate is reported valid here because nothing has been checked yet -- the assignability
+    gate is the only thing that judges a type, and it does so against the rendered file.
+    """
+    selected: dict[tuple[int, str], TypeValidationResult] = {}
+    for (_scope_id, name), bindings in candidates.items():
+        for line0, type_str in bindings:  # most-recent-first
+            selected[(line0, name)] = TypeValidationResult(type_str=type_str, is_valid=True)
+            break
+    return selected
 
 
 def _bucket_variable_drop_reasons(

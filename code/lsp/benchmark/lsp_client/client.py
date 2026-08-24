@@ -18,10 +18,8 @@ _SRC_DIR = str(Path(__file__).resolve().parents[2] / "src")
 # The shipped defaults, so a run measures the pipeline the tool actually ships. `mypy_enabled`
 # gates the insert-path assignability gate and defaults to True; turning it off made the gate a
 # no-op on every benchmark file and `all_mypy_invalid` structurally zero, which characterises a
-# configuration no user runs. `mypy_inference_validation_enabled` governs the inlay path only and
-# ships False. `set_mypy_gate` lets a caller put the gate back to off deliberately.
+# configuration no user runs. `set_mypy_gate` lets a caller put the gate back to off deliberately.
 _BENCH_CONFIG: dict[str, Any] = {
-    "mypy_inference_validation_enabled": False,
     "mypy_enabled": True,
 }
 

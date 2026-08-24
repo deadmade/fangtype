@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     from fangtype.analysis import Scope, ScopeTree
     from fangtype.cancellation import CancellationToken
     from fangtype.inference.inference_result import InferenceResult
-    from fangtype.validation.mypy_validator import TypeValidationResult
 
 logger = logging.getLogger(__name__)
 
@@ -121,22 +120,10 @@ class InlayHintHelper:
 
         return annotated_vars
 
-    @staticmethod
-    def _validity_for(
-        validation_results: dict[str, TypeValidationResult] | None, validation_key: str
-    ) -> bool | None:
-        """Return key validity: None = don't emit; None results-dict = validation off, all valid."""
-        if validation_results is None:
-            return True
-        result = validation_results.get(validation_key)
-        return result.is_valid if result is not None else None
-
     def generate_hints_for_scope(
         self,
         scope: Scope,
         source: str,
-        validation_results: dict[str, TypeValidationResult] | None,
-        scope_id: str,
     ) -> list[types.InlayHint]:
         """Generate inlay hints for all variables/parameters/returns in a scope."""
         hints: list[types.InlayHint] = []
@@ -161,18 +148,14 @@ class InlayHintHelper:
                 )
                 continue
 
-            # Check if type was validated - show all types, mark invalid ones
-            validation_key = f"{scope_id}.var.{var_name}"
-            is_valid = self._validity_for(validation_results, validation_key)
-            if is_valid is not None:
-                hint = self._build_type_hint(
-                    type_info.line,
-                    self._col_to_utf16(hint_lines, type_info.line, type_info.col + len(var_name)),
-                    " ",
-                    type_info.type_str,
-                    is_valid,
-                )
-                hints.append(hint)
+            hint = self._build_type_hint(
+                type_info.line,
+                self._col_to_utf16(hint_lines, type_info.line, type_info.col + len(var_name)),
+                " ",
+                type_info.type_str,
+                True,
+            )
+            hints.append(hint)
 
         # Generate hints for parameters (function scopes only)
         if scope.scope_type == ScopeType.FUNCTION:
@@ -214,29 +197,22 @@ class InlayHintHelper:
                         )
                         continue
 
-                    # Check if type was validated - show all types, mark invalid ones
-                    validation_key = f"{scope_id}.param.{param_name}"
-                    is_valid = self._validity_for(validation_results, validation_key)
-                    if is_valid is not None:
-                        hint = self._build_type_hint(
-                            type_info.line,
-                            self._col_to_utf16(
-                                hint_lines, type_info.line, type_info.col + len(param_name)
-                            ),
-                            ": ",
-                            type_info.type_str,
-                            is_valid,
-                        )
-                        hints.append(hint)
+                    hint = self._build_type_hint(
+                        type_info.line,
+                        self._col_to_utf16(
+                            hint_lines, type_info.line, type_info.col + len(param_name)
+                        ),
+                        ": ",
+                        type_info.type_str,
+                        True,
+                    )
+                    hints.append(hint)
 
                 # Generate return type hint
-                validation_key = f"{scope_id}.return"
-                return_is_valid = self._validity_for(validation_results, validation_key)
                 if (
                     scope.return_type
                     and scope.return_type.type_str != "Unknown"
                     and not func_node.returns
-                    and return_is_valid is not None
                 ):
                     # Anchor after the signature's ')' — which may not be on the def line.
                     signature_end = _signature_end(hint_lines, func_node)
@@ -247,7 +223,7 @@ class InlayHintHelper:
                             codepoint_to_utf16(hint_lines[close_line], close_col),
                             " -> ",
                             scope.return_type.type_str,
-                            return_is_valid,
+                            True,
                         )
                         hints.append(hint)
 

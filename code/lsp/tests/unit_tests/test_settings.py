@@ -22,13 +22,11 @@ class TestSettingsUpdate:
         settings.update(
             {
                 "mypyEnabled": False,
-                "mypyInferenceValidationEnabled": True,
                 "diagnosticSeverity": "warning",
             }
         )
 
         assert settings.mypy_enabled is False
-        assert settings.mypy_inference_validation_enabled is True
         assert settings.diagnostic_severity == "warning"
 
     def test_updates_from_nested_autotype_payload(self) -> None:
@@ -46,13 +44,11 @@ class TestSettingsUpdate:
         settings.update(
             {
                 "mypyEnabled": "false",
-                "mypyInferenceValidationEnabled": "true",
                 "diagnosticSeverity": 123,
             }
         )
 
         assert settings.mypy_enabled is True
-        assert settings.mypy_inference_validation_enabled is False
         assert settings.diagnostic_severity == "information"
 
     def test_ignores_invalid_diagnostic_severity(self) -> None:
@@ -84,13 +80,14 @@ class TestSettingsUpdate:
 class TestSettingsDefaults:
     """Defaults must match the VSCode client (package.json / common/settings.ts)."""
 
-    def test_update_omitting_key_leaves_default_false(self) -> None:
-        """A client payload that omits the key must not silently enable validation."""
+    def test_update_omitting_key_leaves_the_other_defaults(self) -> None:
+        """A client payload that omits a key must leave that key at its default."""
         settings = Settings()
 
         settings.update({"mypyEnabled": False})
 
-        assert settings.mypy_inference_validation_enabled is False
+        assert settings.mypy_enabled is False
+        assert settings.cross_file_contracts_enabled is True
 
 
 class TestSettingsGeneration:
@@ -175,12 +172,12 @@ class TestServerSettingsRefresh:
         self, lsp_server: FangtypeServer
     ) -> None:
         """An empty payload must not pull config and must leave settings unchanged."""
-        lsp_server.settings.mypy_inference_validation_enabled = False  # marker to detect change
+        lsp_server.settings.cross_file_contracts_enabled = False  # marker to detect change
         params = types.DidChangeConfigurationParams(settings={})
 
         await lsp_server.did_change_configuration(params)
 
-        assert lsp_server.settings.mypy_inference_validation_enabled is False
+        assert lsp_server.settings.cross_file_contracts_enabled is False
 
     async def test_did_change_configuration_accepts_per_folder_array(
         self, lsp_server: FangtypeServer

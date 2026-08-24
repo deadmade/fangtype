@@ -1,26 +1,20 @@
 """Mypy-based type validator for checking type annotation correctness."""
 
 import asyncio
-import keyword
 import logging
 import os
 import re
 import subprocess
 import threading
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeVar, cast
+from typing import cast
 
 from injector import inject
 
-from fangtype.analysis.types import ImportHint
 from fangtype.utils.settings import Settings
 from fangtype.validation.mypy_diagnostic import MypyDiagnostic
 from fangtype.validation.mypy_runner import MypyRunner
-
-# Generic bulk-validation key (str or (line, var)) so each caller's key type flows through, not Any.
-_KeyT = TypeVar("_KeyT")
 
 
 @dataclass
@@ -174,34 +168,6 @@ class MypyTypeValidator:
                 )
             return self._runner
 
-    @staticmethod
-    def _sanitize_var_name(name: str) -> str:
-        """Turn a string into a valid Python identifier (non-alnum to underscore, escape kwds)."""
-        # Replace non-alphanumeric characters with underscores
-        sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", name)
-
-        # Handle reserved keywords - check each part after splitting by underscore
-        parts = sanitized.split("_")
-        sanitized_parts = []
-        for part in parts:
-            if not part:
-                continue
-            if keyword.iskeyword(part) or keyword.issoftkeyword(part):
-                sanitized_parts.append(f"{part}_")
-            else:
-                sanitized_parts.append(part)
-
-        return "_".join(sanitized_parts)
-
-    @staticmethod
-    def _key_to_var_name(key: object) -> str:
-        """Derive the probe var name from a bulk key (str, or name slot of a (line, name) tuple)."""
-        if isinstance(key, tuple) and len(key) == 2:
-            name = cast("tuple[object, object]", key)[1]
-            if isinstance(name, str):
-                return name
-        return str(key)
-
     def _run_mypy_sync(self, code: str) -> tuple[str, str, int]:
         """Validate `code` in a mypy subprocess."""
         return self._ensure_runner().run(code)
@@ -280,116 +246,3 @@ class MypyTypeValidator:
     def _log_empty_mypy_output(self, stderr: str, context: str) -> None:
         """Log warning when mypy returns non-zero exit but no stdout."""
         logger.warning(f"Mypy {context} failed with no output: {stderr}")
-
-    async def validate_bulk(
-        self,
-        types_map: dict[_KeyT, str],
-        source: str,
-        import_hints: Mapping[_KeyT, ImportHint | None] | None = None,
-    ) -> dict[_KeyT, TypeValidationResult]:
-        """Validate many types in a single mypy run, returning {key: TypeValidationResult}."""
-        if not types_map:
-            return {}
-
-        try:
-            # Run in thread since mypy is blocking
-            return await asyncio.to_thread(
-                self._validate_bulk_sync, types_map, source, import_hints
-            )
-        except asyncio.CancelledError:
-            logger.info("Mypy bulk validation cancelled by client")
-            raise
-
-    def _validate_bulk_sync(
-        self,
-        types_map: dict[_KeyT, str],
-        source: str,
-        import_hints: Mapping[_KeyT, ImportHint | None] | None = None,
-    ) -> dict[_KeyT, TypeValidationResult]:
-        """Synchronous implementation of validate_bulk."""
-        if not types_map:
-            return {}
-
-        # Distinct imports needed by the probed types, prepended so import-needing types resolve.
-        import_lines: list[str] = []
-        if import_hints:
-            seen: set[ImportHint] = set()
-            for hint in import_hints.values():
-                if hint is not None and hint not in seen:
-                    seen.add(hint)
-                    import_lines.append(f"from {hint[0]} import {hint[1]}\n")
-
-        # Build annotated test code, tracking line->variable; mypy -c numbers lines from 1.
-        test_lines = list(import_lines)
-        if source:
-            test_lines.append(source)
-            if not source.endswith("\n"):
-                test_lines.append("\n")
-
-        # Calculate exactly how many lines the source (and potential newline) takes.
-        source_line_count = "".join(test_lines).count("\n")
-
-        test_lines.append("# Auto-type test annotations\n")
-        # Comment line is source_line_count + 1.
-
-        var_to_line: dict[_KeyT, int] = {}
-        line_to_key: dict[int, _KeyT] = {}
-        # First variable will be on source_line_count + 2.
-        current_line = source_line_count + 2
-
-        for key, type_str in types_map.items():
-            var_name = self._key_to_var_name(key)
-            sanitized_name = self._sanitize_var_name(var_name)
-
-            # Use unique suffix to allow same variable name multiple times.
-            unique_suffix = f"_{current_line}"
-            test_lines.append(f"_fangtype_test_{sanitized_name}{unique_suffix}: {type_str}\n")
-
-            var_to_line[key] = current_line
-            line_to_key[current_line] = key
-            current_line += 1
-
-        test_code = "".join(test_lines)
-
-        stdout, stderr, exit_code = self._run_mypy_sync(test_code)
-
-        # Initialize all results as valid.
-        validation_results: dict[_KeyT, TypeValidationResult] = {
-            key: TypeValidationResult(type_str=type_str, is_valid=True)
-            for key, type_str in types_map.items()
-        }
-
-        # If everything passed, return all types as valid.
-        if exit_code == 0:
-            return validation_results
-
-        if not stdout:
-            # Non-zero exit with no diagnostics means mypy crashed (bad flags, missing interpreter),
-            # not that the types are invalid. Fail open like validate_file_full so a crash degrades
-            # to "unvalidated" rather than a misleading all-invalid no-op that inserts nothing.
-            self._log_empty_mypy_output(stderr, "bulk validation")
-            return validation_results
-
-        # Parse mypy output and map errors back to input keys in a single pass.
-        diagnostics = self._parse_mypy_output(stdout)
-        for diagnostic in diagnostics:
-            if diagnostic.severity != "error":
-                continue
-
-            matched_key = line_to_key.get(diagnostic.line)
-            if matched_key is None:
-                continue
-
-            # Keep the first error reported for each input key.
-            if validation_results[matched_key].is_valid is False:
-                continue
-
-            matched_type_str = types_map[matched_key]
-            validation_results[matched_key] = TypeValidationResult(
-                type_str=matched_type_str,
-                is_valid=False,
-                error_message=diagnostic.message,
-            )
-            logger.debug(f"Invalid type: {matched_key}: {matched_type_str} - {diagnostic.message}")
-
-        return validation_results

@@ -75,12 +75,9 @@ async def test_inlay_hints_collects_and_returns_hints(
             self.scopes_by_id = {"root": object()}
 
     fake_inference_result = SimpleNamespace(scope_tree=FakeScopeTree())
-    validation_results = {"x": MagicMock()}
 
     workflow = MagicMock()
-    workflow.collect_and_validate_types = AsyncMock(
-        return_value=(fake_inference_result, validation_results)
-    )
+    workflow.collect_types = AsyncMock(return_value=fake_inference_result)
 
     hint = types.InlayHint(
         position=types.Position(line=0, character=0),
@@ -107,7 +104,7 @@ async def test_inlay_hints_collects_and_returns_hints(
     helper.process_usage_hints.assert_called_once()
 
     # A per-request cancel token is threaded into both inference calls; not cancelled normally.
-    cav_token = workflow.collect_and_validate_types.call_args.kwargs["cancel_token"]
+    cav_token = workflow.collect_types.call_args.kwargs["cancel_token"]
     puh_token = helper.process_usage_hints.call_args.kwargs["cancel_token"]
     assert cav_token is not None
     assert puh_token is cav_token
@@ -426,7 +423,7 @@ async def test_inlay_hints_cancel_cancels_token(
     lsp_server: FangtypeServer, fake_workspace: FakeWorkspace
 ) -> None:
     workflow = MagicMock()
-    workflow.collect_and_validate_types = AsyncMock(side_effect=asyncio.CancelledError)
+    workflow.collect_types = AsyncMock(side_effect=asyncio.CancelledError)
     helper = MagicMock(spec=InlayHintHelper)
 
     lsp_server.settings = Settings()
@@ -441,7 +438,7 @@ async def test_inlay_hints_cancel_cancels_token(
     result = await lsp_server.inlay_hints(params)
 
     assert result == []
-    passed = workflow.collect_and_validate_types.call_args.kwargs["cancel_token"]
+    passed = workflow.collect_types.call_args.kwargs["cancel_token"]
     assert passed is not None
     assert passed.cancelled() is True  # handler called cancel_token.cancel()
 

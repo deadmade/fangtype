@@ -11,7 +11,6 @@ export interface ISettings {
 
     // Fangtype domain settings (camelCase; server snake-cases these keys).
     mypyEnabled: boolean;
-    mypyInferenceValidationEnabled: boolean;
     diagnosticSeverity: string;
     crossFileContractsEnabled: boolean;
     logLevel: string;
@@ -22,7 +21,6 @@ const DEFAULTS = {
     installMode: 'managed',
     mypyEnabled: true,
     // Mirrors package.json's declared default (authoritative).
-    mypyInferenceValidationEnabled: false,
     crossFileContractsEnabled: true,
     logLevel: 'warning',
 } as const;
@@ -46,12 +44,7 @@ function severityForLogLevel(logLevel: string): string {
 const INFRA_KEYS = ['interpreter', 'installMode'] as const;
 
 /** Domain keys pushed to the server (camelCase, snake-cased server-side). */
-const DOMAIN_KEYS = [
-    'mypyEnabled',
-    'mypyInferenceValidationEnabled',
-    'crossFileContractsEnabled',
-    'logLevel',
-] as const;
+const DOMAIN_KEYS = ['mypyEnabled', 'crossFileContractsEnabled', 'logLevel'] as const;
 
 function resolveSettings(
     config: WorkspaceConfiguration,
@@ -65,9 +58,6 @@ function resolveSettings(
         installMode: config.get<string>('installMode') ?? DEFAULTS.installMode,
 
         mypyEnabled: config.get<boolean>('mypyEnabled') ?? DEFAULTS.mypyEnabled,
-        mypyInferenceValidationEnabled:
-            config.get<boolean>('mypyInferenceValidationEnabled') ??
-            DEFAULTS.mypyInferenceValidationEnabled,
         // Derived from logLevel (its own setting was merged away), still pushed to the server.
         diagnosticSeverity: severityForLogLevel(
             config.get<string>('logLevel') ?? DEFAULTS.logLevel

@@ -79,19 +79,16 @@ class TestContainerIntegration:
         assert result is not None
         assert result.scope_tree is not None
 
-    def test_type_validator_works(self, sample_source: str) -> None:
+    def test_type_validator_works(self) -> None:
         """Test that type validator actually works."""
         container = build_container()
         validator = container.get(TypeValidatorProtocol)
 
-        # Should be able to validate types
-        valid_result = asyncio.run(validator.validate_bulk({"_single": "int"}, sample_source))
-        assert valid_result["_single"].is_valid is True
+        # A well-typed file is clean; a mistyped assignment is reported.
+        assert asyncio.run(validator.validate_file_full("ok: int = 1\n")) == []
 
-        invalid_result = asyncio.run(
-            validator.validate_bulk({"_single": "NonExistentType"}, sample_source)
-        )
-        assert invalid_result["_single"].is_valid is False
+        broken = asyncio.run(validator.validate_file_full("bad: str = 1\n"))
+        assert [d.error_code for d in broken] == ["assignment"]
 
     def test_insertion_engine_works(self) -> None:
         """Test that insertion engine actually works."""

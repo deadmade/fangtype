@@ -48,7 +48,6 @@ def _make_params(start_line: int = 0) -> types.CodeActionParams:
 def _make_helper(
     inference_engine: MagicMock,
     insertion_engine: MagicMock,
-    type_validator: MagicMock,
     settings: Settings | None = None,
 ) -> CodeActionHelper:
     """Build the helper with a workflow whose gate delegates straight to `insertion_engine`.
@@ -63,7 +62,6 @@ def _make_helper(
     return CodeActionHelper(
         inference_engine,
         insertion_engine,
-        type_validator,
         DocumentCache(),
         settings or Settings(),
         workflow,
@@ -99,12 +97,7 @@ class TestGetInsertTypeActionsOffMainThread:
         insert_result.modified_source = "x: int = 1\n"
         insertion_engine.insert.return_value = insert_result
 
-        validation_result = MagicMock()
-        validation_result.is_valid = True
-        type_validator = MagicMock()
-        type_validator.validate_bulk = AsyncMock(return_value={"_single": validation_result})
-
-        helper = _make_helper(inference_engine, insertion_engine, type_validator)
+        helper = _make_helper(inference_engine, insertion_engine)
 
         actions = await helper.get_insert_type_actions(
             cast("LanguageServer", ls), _make_params(start_line=0)
@@ -135,12 +128,7 @@ class TestGetInsertTypeActionsClickedOccurrence:
         insert_result.modified_source = "x = 1\n\nx: str = 2\n"
         insertion_engine.insert.return_value = insert_result
 
-        validation_result = MagicMock()
-        validation_result.is_valid = True
-        type_validator = MagicMock()
-        type_validator.validate_bulk = AsyncMock(return_value={"_single": validation_result})
-
-        helper = _make_helper(inference_engine, insertion_engine, type_validator)
+        helper = _make_helper(inference_engine, insertion_engine)
 
         actions = await helper.get_insert_type_actions(
             cast("LanguageServer", ls), _make_params(start_line=2)
@@ -173,10 +161,8 @@ class TestGetInsertTypeActionsCancelToken:
         inference_engine.infer_types = MagicMock(return_value=inference_result)
 
         insertion_engine = MagicMock()
-        type_validator = MagicMock()
-        type_validator.validate_bulk = AsyncMock(return_value={})
 
-        helper = _make_helper(inference_engine, insertion_engine, type_validator)
+        helper = _make_helper(inference_engine, insertion_engine)
 
         await helper.get_insert_type_actions(
             cast("LanguageServer", ls), _make_params(start_line=0), cancel_token=cancel_token
@@ -196,10 +182,8 @@ class TestGetInsertTypeActionsCancelToken:
         inference_engine.infer_types = MagicMock(return_value=inference_result)
 
         insertion_engine = MagicMock()
-        type_validator = MagicMock()
-        type_validator.validate_bulk = AsyncMock(return_value={})
 
-        helper = _make_helper(inference_engine, insertion_engine, type_validator)
+        helper = _make_helper(inference_engine, insertion_engine)
 
         await helper.get_insert_type_actions(cast("LanguageServer", ls), _make_params(start_line=0))
 
@@ -243,16 +227,14 @@ def _real_helper(source_types: dict[tuple[int, str], str], settings: Settings) -
         settings,
         DocumentCache(),
     )
-    return CodeActionHelper(
-        inference, insertion_engine, validator, DocumentCache(), settings, workflow
-    )
+    return CodeActionHelper(inference, insertion_engine, DocumentCache(), settings, workflow)
 
 
 class TestCodeActionAssignabilityGate:
     """The lightbulb runs the same full-file mypy gate the insert requests run.
 
-    Candidate selection probes a bare declaration, which has no right-hand side, so ``int`` passes
-    there for a name holding a string. Only the gate reads the annotation against its real value.
+    The gate reads the annotation against its real right-hand side in the rendered file, so a
+    wrong ``int`` for a name holding a string leaves no action to offer.
     """
 
     async def test_wrong_type_is_not_offered(self) -> None:
