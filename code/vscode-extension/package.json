@@ -2,7 +2,7 @@
     "name": "fangtype",
     "displayName": "Fangtype",
     "description": "Interactive Python type annotation with ghost text",
-    "version": "0.5.12",
+    "version": "0.5.13",
     "publisher": "fangtype",
     "author": "deadmade",
     "license": "MIT",

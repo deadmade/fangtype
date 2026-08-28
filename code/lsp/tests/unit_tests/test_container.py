@@ -55,11 +55,14 @@ class TestContainerWiring:
         assert isinstance(diagnostic_engine, DiagnosticEngine)
         assert diagnostic_engine is container.get(DiagnosticEngine)
 
-        # CodeActionHelper
+        # CodeActionHelper. It reaches every engine through the workflow, which is the same
+        # singleton the insert requests use, so the lightbulb and the requests cannot diverge.
+        from fangtype.workflow import TypeAnnotationWorkflow
+
         ca_helper = container.get(CodeActionHelper)
         assert isinstance(ca_helper, CodeActionHelper)
-        assert hasattr(ca_helper, "insertion_engine")
-        assert ca_helper.insertion_engine is container.get(InsertionEngine)
+        assert hasattr(ca_helper, "workflow")
+        assert ca_helper.workflow is container.get(TypeAnnotationWorkflow)
 
         # InlayHintHelper
         ih_helper = container.get(InlayHintHelper)

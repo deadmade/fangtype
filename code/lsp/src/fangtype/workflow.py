@@ -136,6 +136,52 @@ class TypeAnnotationWorkflow:
         """
         return await self._insert_with_assignability_gate(targets, source)
 
+    async def prepare_targets_for_line(
+        self,
+        source: str,
+        file_path: str | None,
+        line_0_based: int,
+        cancel_token: CancellationToken | None = None,
+        uri: str | None = None,
+        version: int | None = None,
+    ) -> list[InsertionTarget]:
+        """Every InsertionTarget the file yields whose insert lands on `line_0_based`.
+
+        The code-action path needs the same targets the file-wide insert builds, restricted to one
+        line, so the lightbulb reaches every kind the engine can write rather than the simple
+        assignments a regex could recognise.
+
+        `per_binding=True` surfaces each binding of a repeated name instead of only the most recent
+        one, which is what lets the line restriction pick the clicked occurrence. Parameters and
+        returns both carry their `def` line, so a click on a signature collects the whole of it.
+
+        The line is applied twice, to the inference keys and then to the built targets, because the
+        two can disagree. Inference surfaces a self-attribute under its bare name as a variable as
+        well, `find_assignment_target` cannot place that bare name in source that says `self.value`,
+        and `find_variable_line` answers 1 when it finds no candidate -- so without the first
+        restriction every unplaceable name in the file would pile onto line 1. The second keeps the
+        offered edit about the line that was actually clicked.
+        """
+        (
+            targets,
+            _var_count,
+            _func_count,
+            early_message,
+            _reasons,
+        ) = await self._prepare_insertion_targets(
+            source,
+            file_path,
+            cancel_token=cancel_token,
+            uri=uri,
+            version=version,
+            only_line=line_0_based,
+            per_binding=True,
+        )
+        if early_message is not None:
+            return []
+        line_1_based = line_0_based + 1
+        return [t for t in targets if t.location.line == line_1_based]
+
     async def _insert_with_assignability_gate(
         self, targets: list[InsertionTarget], source: str
     ) -> InsertionResult:
@@ -341,6 +387,7 @@ class TypeAnnotationWorkflow:
         version: int | None = None,
         *,
         only: tuple[str, int] | None = None,
+        only_line: int | None = None,
         per_binding: bool = False,
     ) -> tuple[list[InsertionTarget], int, int, str | None, dict[str, int]]:
         """Infer+validate+build InsertionTargets; `only` scopes to cursor, `per_binding` all.
@@ -373,6 +420,13 @@ class TypeAnnotationWorkflow:
         if only is not None:
             variable_insertions, function_insertions, attribute_insertions = _restrict_to_target(
                 only, variable_insertions, function_insertions, attribute_insertions
+            )
+
+        # 2c. Narrow to one line (code-action only). Meaningful only alongside `only`/`per_binding`,
+        # since `best_valid` carries its variables in `variable_candidates` instead.
+        if only_line is not None:
+            variable_insertions, function_insertions, attribute_insertions = _restrict_to_line(
+                only_line, variable_insertions, function_insertions, attribute_insertions
             )
 
         inferred_vars: object = variable_candidates if best_valid else variable_insertions
@@ -640,6 +694,22 @@ def _flagged_target_lines(
     mypy reports against the MODIFIED file's line numbers; we map each error line back to its
     original line via difflib before intersecting with the targets' lines. Only lines that host
     a target are returned, so a collateral error elsewhere never drops an unrelated annotation.
+
+    KNOWN LIMITATION -- the gate drops by LINE, not by target. A `def` line hosting three
+    parameter targets and a return target is one line, so a diagnostic naming any one of them
+    drops all four. `_insert_with_assignability_gate` then re-inserts the survivors, and the
+    three correct annotations are gone with the wrong one. Since 0.5.13 the code action offers
+    a whole signature as one action, which is where this is visible to a developer: one bad
+    parameter costs the line its lightbulb entirely.
+
+    TO FIX, and it is not a local change. This function would have to return the flagged
+    TARGETS rather than their lines, which means deciding which target on a shared line a
+    diagnostic belongs to. mypy names a column, so `arg-type` on a parameter is separable from
+    `return-value` on the return, but two parameters flagged on the same `def` still need the
+    column mapped back through `_map_modified_to_original`, which today maps lines only. The
+    caller at `_insert_with_assignability_gate` filters `survivors` on `t.location.line` and
+    would filter on target identity instead. Both insert requests share this path, so the
+    evaluation numbers move with it -- see the eval-rerun note before touching it.
     """
     target_lines = {t.location.line for t in targets}
     error_mod_lines = {
@@ -709,6 +779,29 @@ def _select_key_by_line(keys: list[tuple[int, str]], line_0_based: int) -> tuple
     if at_or_before:
         return max(at_or_before, key=key_line)
     return min(keys, key=key_distance)
+
+
+def _restrict_to_line(
+    line_0_based: int,
+    variable_insertions: dict[tuple[int, str], str],
+    function_insertions: dict[tuple[int, str], FunctionInsertionInfo],
+    attribute_insertions: dict[tuple[int, str], str],
+) -> tuple[
+    dict[tuple[int, str], str],
+    dict[tuple[int, str], FunctionInsertionInfo],
+    dict[tuple[int, str], str],
+]:
+    """Restrict inference's insertion dicts to what was inferred on one line.
+
+    Variable and function keys are 0-based, attribute keys 1-based, which is why the attribute
+    comparison shifts. A function's key line is its `def`, so a signature restricts as a whole.
+    """
+    line_1_based = line_0_based + 1
+    return (
+        {k: v for k, v in variable_insertions.items() if k[0] == line_0_based},
+        {k: info for k, info in function_insertions.items() if k[0] == line_0_based},
+        {k: v for k, v in attribute_insertions.items() if k[0] == line_1_based},
+    )
 
 
 def _restrict_to_target(
