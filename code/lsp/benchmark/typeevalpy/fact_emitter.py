@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from benchmark.lsp_client.shim import _collect_structure
+from benchmark.lsp_client.shim import _collect_structure, innermost_enclosing_func
 
 
 def split_types(type_str: str) -> list[str]:
@@ -67,7 +67,7 @@ def emit_facts(
         attr_lines,
         var_enclosing,
         def_params,
-        _func_ranges,
+        func_ranges,
         _attr_pos,
         _name_pos,
     ) = _collect_structure(source)
@@ -82,8 +82,15 @@ def emit_facts(
 
     # Parameters + return fallback from inlay hints.
     for line0, char, type_str, is_return in hints:
-        if is_return and line0 in def_lines:
-            return_type_str[(line0, def_lines[line0])] = type_str
+        if is_return:
+            # A wrapped signature anchors its return hint on the closing-paren line rather
+            # than the def line, so an exact `def_lines` miss falls back to the innermost
+            # function whose range contains the hint's line -- see
+            # `innermost_enclosing_func` for why the smallest span has to win.
+            qname = def_lines.get(line0) or innermost_enclosing_func(line0, func_ranges)
+            if qname is not None:
+                def_line0 = func_ranges.get(qname, (line0, line0))[0]
+                return_type_str[(def_line0, qname)] = type_str
         elif (line0, char) in param_pos:
             qname, param = param_pos[(line0, char)]
             types = split_types(type_str)

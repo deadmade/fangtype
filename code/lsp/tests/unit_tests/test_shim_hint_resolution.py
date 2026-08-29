@@ -93,12 +93,30 @@ CASES = [
         1,
     ),
     (
-        "a return on a wrapped signature is left for later",
+        "a return on a wrapped signature resolves to its enclosing def",
         "def f(\n    a,\n):\n    return 1\n",
-        # The anchor lands just past the ')' on line 2, which is not a def line.
+        # The anchor lands just past the ')' on line 2, which is not a def line, but line 2
+        # falls inside f's own range, so the fact still carries f's def line, 0.
         [(2, 1, "int", True)],
-        [],
-        1,
+        [("f", "int", 0)],
+        0,
+    ),
+    (
+        "a wrapped return resolves to the innermost enclosing def, not the outer one",
+        (
+            "def outer():\n"
+            "    def inner(\n"
+            "        a,\n"
+            "    ):\n"
+            "        return a\n"
+            "    return inner(1)\n"
+        ),
+        # The closing ')' of inner's wrapped signature lands on line 3, which sits inside
+        # both outer's range (0-5) and inner's (1-4). inner's range is smaller, so the
+        # return belongs to inner and carries inner's own def line, 1, not outer's, 0.
+        [(3, 5, "int", True)],
+        [("inner", "int", 1)],
+        0,
     ),
 ]
 
@@ -180,6 +198,23 @@ class TestAnchorsAgreeWithTheServer:
         assert ("width", "int", 2) in facts
         assert ("s", "int", 5) in facts
         assert ("area", "int", 4) in facts
+
+    def test_wrapped_signature_return_round_trips(self, engine) -> None:
+        """The server's own ``_signature_end`` anchors this return past the ')' on line 2,
+        never on the ``def`` line, which is exactly the case ``resolve_hint_facts`` used to
+        drop. Only the real hint generator can prove the anchor lands where the fallback
+        expects it to, rather than where hand-computed test columns assume it does."""
+        source = "def area(\n    h,\n):\n    s = 2\n    return s + h\n"
+
+        hints = self._server_hints(engine, source)
+        assert any(is_return and line0 == 2 for line0, _char, _type_str, is_return in hints), (
+            f"expected the server to anchor the return hint on the closing-paren line, got {hints}"
+        )
+
+        facts, dropped = resolve_hint_facts(source, hints)
+
+        assert dropped == 0
+        assert any(name == "area" and line0 == 0 for name, _type_str, line0 in facts)
 
     def test_non_ascii_identifiers_round_trip(self, engine) -> None:
         """Every anchor here sits past a multi-byte character, so a byte column would miss."""

@@ -33,6 +33,31 @@ class LspScope:
         self.attributes: dict[str, TypeInfo] = attributes or {}
 
 
+def innermost_enclosing_func(line0: int, func_ranges: dict[str, tuple[int, int]]) -> str | None:
+    """Return the qualified name of the INNERMOST function whose range contains ``line0``.
+
+    ``func_ranges`` maps a qualified name to its ``(start_line0, end_line0)`` span, inclusive,
+    and a nested ``def`` sits entirely inside every one of its enclosing ``def``s' ranges, so a
+    line inside the nested body matches more than one entry. The smallest span always belongs
+    to the innermost function, since an outer function's range strictly contains every nested
+    one, so picking the minimum span rather than the first hit is what keeps a return on a
+    nested function from being attributed to its parent. ``None`` when no range contains the
+    line, i.e. at module level.
+
+    This is the one selection rule shared by ``LspScopeTree.find_scope_for_line`` and the
+    return-hint recovery in ``resolve_hint_facts``/``fact_emitter.emit_facts`` below, so all
+    three treat a wrapped or nested signature the same way.
+    """
+    best_qname: str | None = None
+    best_span: int | None = None
+    for qname, (start, end) in func_ranges.items():
+        if start <= line0 <= end:
+            span = end - start
+            if best_span is None or span < best_span:
+                best_span, best_qname = span, qname
+    return best_qname
+
+
 class LspScopeTree:
     """Minimal scope-tree facade answering the exact reads the runners perform."""
 
@@ -84,14 +109,8 @@ class LspScopeTree:
     def find_scope_for_line(self, line0: int) -> LspScope | None:
         """Return the INNERMOST function scope whose line range contains ``line0``
         (mirrors fangtype's ``ScopeTree.find_scope_for_line``). ``None`` at module level."""
-        best_qname: str | None = None
-        best_span: int | None = None
-        for qname, (start, end) in self._func_ranges.items():
-            if start <= line0 <= end:
-                span = end - start
-                if best_span is None or span < best_span:
-                    best_span, best_qname = span, qname
-        return self._functions.get(best_qname) if best_qname is not None else None
+        qname = innermost_enclosing_func(line0, self._func_ranges)
+        return self._functions.get(qname) if qname is not None else None
 
     def resolve_function_scope(
         self, function_name: str, line_number: int | None
@@ -296,9 +315,10 @@ def resolve_hint_facts(
         ``(facts, dropped)``. ``facts`` is ``(name, type_str, line0)`` — deliberately the
         same shape ``_preview_tuples`` returns, so a consumer cannot tell which channel
         produced it. A parameter and a return both carry the ``def`` line, matching what
-        ``previewInserts`` reported for them. ``dropped`` counts the hints that matched no
-        store position, which is every usage-site hint (those sit at a Load position) plus a
-        return on a wrapped signature, whose anchor is the closing-paren line.
+        ``previewInserts`` reported for them, even when the return hint itself anchors on a
+        wrapped signature's closing-paren line (see the ``is_return`` branch below).
+        ``dropped`` counts the hints that matched no store position, which is every
+        usage-site hint (those sit at a Load position).
     """
     (
         def_lines,
@@ -316,11 +336,20 @@ def resolve_hint_facts(
     for line0, char, type_str, is_return in hints:
         key = (line0, char)
         if is_return:
+            # A single-line def anchors its return hint on the def line itself, so the
+            # exact hit resolves for free. A wrapped def anchors on the closing-paren line
+            # instead (`_signature_end`), which is never a `def_lines` key, so that case
+            # falls through to the innermost function enclosing the hint's line — the same
+            # rule `find_scope_for_line` uses, picked by minimum span so a nested def's
+            # return is never misattributed to the def that contains it.
             qname = def_lines.get(line0)
+            if qname is None:
+                qname = innermost_enclosing_func(line0, func_ranges)
             if qname is None:
                 dropped += 1
                 continue
-            facts.append((qname.rsplit(".", 1)[-1], type_str, line0))
+            def_line0 = func_ranges.get(qname, (line0, line0))[0]
+            facts.append((qname.rsplit(".", 1)[-1], type_str, def_line0))
         elif key in param_pos:
             qname, param = param_pos[key]
             def_line0 = func_ranges.get(qname, (line0, line0))[0]
