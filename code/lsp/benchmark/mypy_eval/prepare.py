@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import cast
 
 import fangtype.removal
+from benchmark.lsp_client.label_parse import as_mapping
 from benchmark.mypy_eval.normalizer import normalize_annotation
 from fangtype.removal import RemovalEngine
 
@@ -421,7 +422,15 @@ def _reusable_preparation(
         return None
 
 
-def _build_target(entry: dict[str, object]) -> MypyTargetManifest:
+def _build_target(entry: object) -> MypyTargetManifest:
+    """Build one manifest entry from a removal record.
+
+    ``entry`` is a ``RemovalRecord`` (``removal/engine.py``), but over LSP it arrives as
+    the pygls namedtuple ``_dict_to_object`` produces rather than a ``dict`` (see
+    ``as_mapping``'s docstring). Normalise first so every ``entry[...]``/``entry.get(...)``
+    read below works the same for both shapes.
+    """
+    entry = as_mapping(entry)
     annotation = str(entry["type"])
     return MypyTargetManifest(
         identifier=str(entry["variable"]),

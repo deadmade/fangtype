@@ -20,6 +20,36 @@ def _field(obj: Any, *names: str) -> Any:
     return None
 
 
+def as_mapping(entry: Any) -> dict[str, Any]:
+    """Normalise one removal-record-shaped entry to a plain ``dict``.
+
+    ``RemovalRecord`` (``removal/engine.py``) is a ``TypedDict`` and serialises to a
+    plain JSON object, but pygls re-parses every custom-request response through
+    ``pygls.protocol._dict_to_object``, whose ``object_hook`` turns each nested object
+    into ``namedtuple(type_name, keys, rename=True)(*values)`` rather than leaving it a
+    ``dict``. A caller that reads ``entry["type"]`` off that namedtuple gets
+    ``TypeError: tuple indices must be integers or slices, not str``, because subscripting
+    a tuple by name is not a thing. So a live response's entries need converting back to a
+    mapping before any ``entry["..."]`` or ``entry.get("...")`` read is safe, exactly the
+    concern ``_field`` above already handles for the single-key case.
+
+    A plain ``dict`` (JSON, or a hand-built test double) passes through unchanged. An
+    object exposing ``_asdict`` (the pygls namedtuple case) is converted through it, which
+    also preserves ``None`` values for optional fields such as ``function_name`` and
+    ``parameter_name``. Anything else raises rather than degrading to ``{}``, because a
+    silently empty mapping would make every read below default or KeyError instead of
+    surfacing that the wire shape changed, and a run that swallows 143 corpus files that
+    way caches the resulting empty manifest and keeps reusing it.
+    """
+    if isinstance(entry, dict):
+        return entry
+    if hasattr(entry, "_asdict"):  # pygls namedtuple structuring of a JSON object
+        return dict(entry._asdict())
+    raise TypeError(
+        f"as_mapping: expected a dict or an object with _asdict, got {type(entry).__name__}"
+    )
+
+
 def scrape_inlay_type(label: Any) -> str | None:
     """Extract the inferred type string from an inlay-hint label.
 
