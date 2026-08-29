@@ -388,3 +388,28 @@ y = x + 1"""
         assert "is_main" in thread_flags, "infer_types_at_locations was never called"
         assert thread_flags["is_main"] is False
         assert len(hints) > 0
+
+
+class TestDeclarationPositionsCoverEveryBinding:
+    """Suppression reads the whole history, not the name's last binding.
+
+    ``generate_hints_for_scope`` now emits a declaration hint per binding. If
+    ``get_declaration_positions`` still reported only ``scope.variables`` — the property that
+    collapses a name to ``types[-1]`` — an earlier binding could carry both a declaration hint
+    and a usage hint at the same position.
+    """
+
+    def test_every_binding_of_a_rebound_name_is_a_declaration_position(self) -> None:
+        """All three bindings of ``x`` are suppressed, not just the last one."""
+        source = (
+            "def f():\n    x = 1\n    for x in [1, 2]:\n        pass\n    x += 1\n    return x\n"
+        )
+        engine = JediInferenceEngine(Settings())
+        helper = InlayHintHelper(NameCollector(), engine, Settings())
+
+        positions = helper.get_declaration_positions(engine.infer_types(source).scope_tree)
+
+        # 1-based lines: the assignment, the loop target, and the augmented assignment.
+        assert {(2, 4), (3, 8), (5, 4)} <= positions, (
+            f"expected every binding of 'x' to be a declaration position, got: {positions}"
+        )

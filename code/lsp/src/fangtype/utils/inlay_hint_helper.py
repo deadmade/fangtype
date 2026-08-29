@@ -133,29 +133,43 @@ class InlayHintHelper:
         # Generate hints for local variables
         annotated_vars = self.get_annotated_variable_names(scope)
 
-        for var_name, type_info in scope.variables.items():
+        # One hint per binding, not per name. `scope.variables` collapses a name's history to
+        # `types[-1]`, so a name bound twice with different types used to be offered only at its
+        # last binding even though the write path (`per_binding=True`) can annotate the earlier
+        # one. Iterating the history closes that gap between what the tool draws and what it
+        # can write.
+        for var_name, history in scope.variable_history.items():
             # Skip if already annotated
             if var_name in annotated_vars:
                 continue
 
-            # Skip if type is Unknown or invalid position
-            if type_info.type_str == "Unknown":
-                continue
-            if type_info.line < 0 or type_info.col < 0:
-                logger.warning(
-                    f"Invalid position for variable {var_name}: "
-                    f"line={type_info.line}, col={type_info.col}"
-                )
-                continue
+            # Refinement passes append out of order, so several TypeInfos can share a line and
+            # only one of them is the binding's real type. Group by line and let
+            # `get_variable_type_at_line` pick the winner: it already owns that tie-break, and a
+            # second copy of the rule here would drift from it invisibly.
+            for line in sorted({entry.line for entry in history}):
+                type_info = scope.get_variable_type_at_line(var_name, line)
+                if type_info is None:
+                    continue
 
-            hint = self._build_type_hint(
-                type_info.line,
-                self._col_to_utf16(hint_lines, type_info.line, type_info.col + len(var_name)),
-                " ",
-                type_info.type_str,
-                True,
-            )
-            hints.append(hint)
+                # Skip if type is Unknown or invalid position
+                if type_info.type_str == "Unknown":
+                    continue
+                if type_info.line < 0 or type_info.col < 0:
+                    logger.warning(
+                        f"Invalid position for variable {var_name}: "
+                        f"line={type_info.line}, col={type_info.col}"
+                    )
+                    continue
+
+                hint = self._build_type_hint(
+                    type_info.line,
+                    self._col_to_utf16(hint_lines, type_info.line, type_info.col + len(var_name)),
+                    " ",
+                    type_info.type_str,
+                    True,
+                )
+                hints.append(hint)
 
         # Generate hints for parameters (function scopes only)
         if scope.scope_type == ScopeType.FUNCTION:
@@ -335,15 +349,20 @@ class InlayHintHelper:
         positions: set[tuple[int, int]] = set()
 
         for scope in scope_tree.scopes_by_id.values():
-            # Variable declarations
-            for type_info in scope.variables.values():
-                if type_info.line >= 0 and type_info.col >= 0:
-                    # TypeInfo uses 0-based lines, convert to 1-based
-                    positions.add((type_info.line + 1, type_info.col))
+            # Variable declarations. Every binding in the history, not just the name's last one:
+            # declaration hints are now emitted per binding, so suppressing only the last would
+            # leave an earlier binding carrying both a declaration hint and a usage hint at the
+            # same position.
+            for history in scope.variable_history.values():
+                for type_info in history:
+                    if type_info.line >= 0 and type_info.col >= 0:
+                        # TypeInfo uses 0-based lines, convert to 1-based
+                        positions.add((type_info.line + 1, type_info.col))
 
             # Parameter declarations
             for type_info in scope.parameters.values():
                 if type_info.line >= 0 and type_info.col >= 0:
+                    # TypeInfo uses 0-based lines, convert to 1-based
                     positions.add((type_info.line + 1, type_info.col))
 
         return positions

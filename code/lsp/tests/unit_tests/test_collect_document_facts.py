@@ -190,19 +190,17 @@ class TestTheDropCountSurvivesTheTwoElementReturn:
         assert bridge.dropped_hints == 1
 
 
-def test_a_name_bound_twice_in_one_scope_yields_exactly_one_fact(engine) -> None:
-    """TEMPORARY PIN — a later task inverts this assertion, and that will not be a regression.
+def test_a_name_bound_twice_in_one_scope_yields_one_fact_per_binding(engine) -> None:
+    """Each binding of a name gets its own declaration hint, so each resolves to its own fact.
 
-    ``Scope.variables`` is a property returning ``types[-1]`` per name, so the server emits
-    one declaration hint per name per scope, anchored at the last binding and carrying that
-    binding's type. ``previewInserts`` reported every binding, so moving the harness onto
-    hints loses the earlier ones. That loss is real and is recorded here rather than left to
-    surface later as unexplained drift in an evaluation number.
+    ``generate_hints_for_scope`` walks ``Scope.variable_history`` rather than the
+    ``Scope.variables`` property, which collapses a name to ``types[-1]``. Under that property
+    a name bound twice was offered only at its last binding, even though the write path already
+    annotates any single binding (``per_binding=True``). The harness reads the same hints a
+    developer is served, so the earlier binding now reaches it as a fact of its own.
 
-    A later task changes the server to emit one hint per binding. When it lands, this file
-    stops describing the tool and the assertion below flips to two facts. Whoever does that
-    should delete this docstring with it, so that nobody reads the inversion as a regression
-    and nobody reads today's behaviour as intended.
+    PEP 526 still allows only one annotation per name per scope. Two facts here means two
+    offers, not two edits that can both be accepted.
 
     The hints come from the real ``InlayHintHelper`` over a live engine on purpose. A
     hand-built pair of hint tuples would resolve to two facts quite happily, so it would pin
@@ -220,7 +218,7 @@ def test_a_name_bound_twice_in_one_scope_yields_exactly_one_fact(engine) -> None
     _hints, facts = asyncio.run(collect_document(_FakeClient(hints), URI, source))
 
     variable_facts = [fact for fact in facts if fact[0] == "x"]
-    assert variable_facts == [("x", "int", 2)], (
-        "the server now emits a hint per binding rather than per name — see this test's "
-        "docstring before treating the extra fact as a failure"
+    assert variable_facts == [("x", "int", 1), ("x", "int", 2)], (
+        "both bindings of 'x' must reach the harness — the first at line 1 and the "
+        "rebinding at line 2, 0-based"
     )
