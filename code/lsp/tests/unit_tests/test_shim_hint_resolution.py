@@ -130,6 +130,65 @@ CASES = [
         0,
     ),
     (
+        "a starred parameter",
+        "def my_sum(a, b, *integers):\n    return a\n",
+        # "def my_sum(a, b, *integers" ends at column 26. ``ast.arg.col_offset`` starts at
+        # the identifier, past the star, which is where the server's anchor starts too.
+        [(0, 26, "tuple", False)],
+        [("integers", "tuple", 0)],
+        0,
+    ),
+    (
+        "a double-starred parameter",
+        "def concatenate(**kwargs):\n    return 1\n",
+        # "def concatenate(**kwargs" ends at column 24.
+        [(0, 24, "dict", False)],
+        [("kwargs", "dict", 0)],
+        0,
+    ),
+    (
+        "a with-item target",
+        "def f(p):\n    with p as fh:\n        pass\n",
+        # "    with p as fh" ends at column 16.
+        [(1, 16, "int", False)],
+        [("fh", "int", 1)],
+        0,
+    ),
+    (
+        "a with-item attribute target",
+        "class C:\n    def m(self, p):\n        with p as self.fh:\n            pass\n",
+        # "        with p as self.fh" ends at column 25, the end of the attribute name.
+        [(2, 25, "int", False)],
+        [("fh", "int", 2)],
+        0,
+    ),
+    (
+        "a with-item tuple target binds each element",
+        "def f(p):\n    with p as (a, b):\n        pass\n",
+        # "(a" ends at column 16 and "b" at column 19.
+        [(1, 16, "int", False), (1, 19, "str", False)],
+        [("a", "int", 1), ("b", "str", 1)],
+        0,
+    ),
+    (
+        "a comprehension target",
+        "def f():\n    ys = [q for q in range(3)]\n    return ys\n",
+        # The bound "q" is the one after "for", ending at column 17, not the "q" at column 11
+        # that reads it.
+        [(1, 6, "list[int]", False), (1, 17, "int", False)],
+        [("ys", "list[int]", 1), ("q", "int", 1)],
+        0,
+    ),
+    (
+        "an except handler's bound name",
+        "def f():\n    try:\n        pass\n    except ValueError as err:\n        return err\n",
+        # "    except ValueError as err" ends at column 28. The name is a bare str on the
+        # handler node, so this anchor is recovered from the source rather than read off ast.
+        [(3, 28, "ValueError", False)],
+        [("err", "ValueError", 3)],
+        0,
+    ),
+    (
         "a wrapped return resolves to the innermost enclosing def, not the outer one",
         (
             "def outer():\n"
@@ -252,6 +311,151 @@ class TestAnchorsAgreeWithTheServer:
 
         assert dropped == 0
         assert ("tötal", "int", 2) in facts
+
+    def test_with_except_and_comprehension_targets_round_trip(self, engine) -> None:
+        """The three forms whose hints the inverse mapping used to have no position for.
+
+        Each was drawn by the server and matched nothing here, so it left as a drop rather
+        than as a wrong fact, which is why nothing failed while the facts went missing. The
+        engine draws all three in one document so a map that only works on one of them is
+        not mistaken for a map that works.
+        """
+        source = (
+            "import io\n"
+            "\n"
+            "\n"
+            "def f():\n"
+            "    with io.StringIO() as fh:\n"
+            "        pass\n"
+            "    try:\n"
+            "        pass\n"
+            "    except ValueError as err:\n"
+            "        pass\n"
+            "    ys = [q for q in range(3)]\n"
+            "    return ys\n"
+        )
+
+        facts, dropped = resolve_hint_facts(source, self._server_hints(engine, source))
+
+        assert dropped == 0
+        assert ("fh", "_IOBase", 4) in facts
+        assert ("err", "ValueError", 8) in facts
+        assert ("q", "int", 10) in facts
+
+    def test_starred_parameters_round_trip(self, engine) -> None:
+        """``*integers`` and ``**kwargs`` are the two the corpus sweep found still dropping.
+
+        TypeEvalPy's ground truth asks for both by their bare names, and the server infers
+        and draws both, so a drop here is recall the scoring never had a chance at.
+        """
+        source = "def my_sum(a, *integers, **kwargs):\n    return a\n"
+
+        hints = self._server_hints(engine, source)
+        facts, dropped = resolve_hint_facts(source, hints)
+
+        assert dropped == 0
+        assert any(name == "integers" for name, _type_str, _line0 in facts), (
+            f"expected a fact for the starred parameter, got {facts} from {hints}"
+        )
+        assert any(name == "kwargs" for name, _type_str, _line0 in facts)
+
+
+class TestExceptHandlerAnchorSpellings:
+    """``ExceptHandler.name`` is a ``str``, so its anchor is derived rather than read.
+
+    Every other binding form hands ``_collect_structure`` an ``expr`` with an
+    ``end_col_offset`` on it. This one does not, so the column comes from tokenizing the span
+    between the end of the exception type and the start of the handler's body. These cases
+    are the spellings that span can take, and each column below is the UTF-16 offset just
+    past the bound name, which is where the server anchors the hint.
+    """
+
+    @staticmethod
+    def _resolves(source: str, line0: int, char: int, name: str) -> None:
+        assert resolve_hint_facts(source, [(line0, char, "E", False)]) == (
+            [(name, "E", line0)],
+            0,
+        )
+
+    def test_extra_whitespace_around_as(self) -> None:
+        source = (
+            "def f():\n    try:\n        pass\n"
+            "    except ValueError   as    err:\n        return err\n"
+        )
+        self._resolves(source, 3, 33, "err")
+
+    def test_dotted_exception_type(self) -> None:
+        source = (
+            "import mod\n\n\ndef f():\n    try:\n        pass\n"
+            "    except mod.Err as err:\n        return err\n"
+        )
+        self._resolves(source, 6, 25, "err")
+
+    def test_parenthesised_tuple_of_exception_types(self) -> None:
+        source = (
+            "def f():\n    try:\n        pass\n"
+            "    except (ValueError, TypeError) as err:\n        return err\n"
+        )
+        self._resolves(source, 3, 41, "err")
+
+    def test_handler_split_across_a_continuation_line(self) -> None:
+        """The bracketed type ends on a later line than the ``except``, so the anchor's line
+        is the one the ``as`` sits on rather than the handler's own."""
+        source = (
+            "def f():\n    try:\n        pass\n"
+            "    except (\n        ValueError\n    ) as err:\n        return err\n"
+        )
+        self._resolves(source, 5, 12, "err")
+
+    def test_backslash_continuation_before_the_as(self) -> None:
+        source = (
+            "def f():\n    try:\n        pass\n"
+            "    except ValueError \\\n            as err:\n        return err\n"
+        )
+        self._resolves(source, 4, 18, "err")
+
+    def test_except_star_group_handler(self) -> None:
+        source = (
+            "def f():\n    try:\n        pass\n    except* ValueError as err:\n        return err\n"
+        )
+        self._resolves(source, 3, 29, "err")
+
+    def test_body_on_the_handler_line(self) -> None:
+        """The span ends at the body's first statement, which here starts on the same line."""
+        source = "def f():\n    try:\n        pass\n    except ValueError as err: return err\n"
+        self._resolves(source, 3, 28, "err")
+
+    def test_non_ascii_bound_name(self) -> None:
+        """The tokenizer counts code points, the hint carries UTF-16, and the two agree only
+        because the column is converted; the byte offset would be 29."""
+        source = (
+            "def f():\n    try:\n        pass\n    except ValueError as ërr:\n        return ërr\n"
+        )
+        self._resolves(source, 3, 28, "ërr")
+        assert resolve_hint_facts(source, [(3, 29, "E", False)]) == ([], 1)
+
+    def test_two_handlers_binding_the_same_name_stay_apart(self) -> None:
+        """Each handler's span is searched separately, so the inner one cannot borrow the
+        outer one's anchor and file a second fact on the wrong line."""
+        source = (
+            "def f():\n    try:\n        pass\n    except ValueError as err:\n"
+            "        try:\n            pass\n        except TypeError as err:\n"
+            "            return err\n"
+        )
+
+        facts, dropped = resolve_hint_facts(
+            source, [(3, 28, "ValueError", False), (6, 31, "TypeError", False)]
+        )
+
+        assert dropped == 0
+        assert sorted(facts) == [("err", "TypeError", 6), ("err", "ValueError", 3)]
+
+    def test_an_unnamed_handler_contributes_no_anchor(self) -> None:
+        """``except ValueError:`` binds nothing, so a hint at the type's own end must drop
+        rather than resolve onto the exception class's name."""
+        source = "def f():\n    try:\n        pass\n    except ValueError:\n        return 1\n"
+
+        assert resolve_hint_facts(source, [(3, 21, "E", False)]) == ([], 1)
 
 
 class TestUsageHintsAreDiscriminatedByPosition:

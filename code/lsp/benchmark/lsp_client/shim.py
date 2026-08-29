@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import tokenize
 from typing import TYPE_CHECKING
 
 from fangtype.analysis.types import TypeInfo, TypeSource
@@ -180,6 +181,97 @@ def _anchor_utf16(lines: list[str], line0: int, byte_col: int, extra_codepoints:
     return codepoint_to_utf16(line_text, byte_to_codepoint(line_text, byte_col) + extra_codepoints)
 
 
+def _codepoint_col(lines: list[str], line0: int, byte_col: int) -> int:
+    """An ``ast`` UTF-8 byte column as a code-point index, passed through for a missing line."""
+    if not 0 <= line0 < len(lines):
+        return byte_col
+    return byte_to_codepoint(lines[line0], byte_col)
+
+
+def _except_name_anchors(
+    lines: list[str], tree: ast.Module
+) -> dict[tuple[int, int], tuple[int, int]]:
+    """Locate the bound identifier of every named ``except`` handler by tokenizing.
+
+    ``ast.ExceptHandler.name`` is a bare ``str`` rather than a node, so alone among the
+    binding forms this module records it carries no position and the anchor has to be
+    recovered from the source text. The grammar makes that recovery exact rather than a
+    guess. A handler that binds a name must also carry a type, because ``except as e:``
+    does not parse, and between the end of that type and the start of the handler's first
+    statement the grammar admits nothing but ``as NAME``, whitespace, backslash
+    continuations and the colon. A comment cannot sit in that span either, since a comment
+    ends the logical line and only a backslash or an open bracket continues one, and a
+    backslash has to be the last character on its line.
+
+    So each handler's span is searched for the one ``as NAME`` token pair whose name is the
+    handler's, and a handler yielding anything other than exactly one match is left out of
+    the map entirely. Its hint then falls through to ``resolve_hint_facts``'s drop counter,
+    which is the outcome to prefer over resolving a fact onto the wrong name.
+
+    Returns ``{(handler_line0, handler_byte_col): (name_line0, name_end_utf16_col)}``. The
+    key is the handler's own start position, which is unique because two handlers cannot
+    begin at the same one, and the value is in the same UTF-16 key space as ``name_pos``.
+    """
+    handlers = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ExceptHandler)
+        and node.name is not None
+        and node.type is not None
+        and node.body
+    ]
+    if not handlers:
+        return {}
+
+    # Tokenized over exactly the partition ``ast_source_lines`` produced, never over
+    # ``source`` directly, so a token's line index and the ``ast`` line indices compared
+    # against it below cannot disagree about which line is which.
+    line_iter = iter([f"{line}\n" for line in lines])
+
+    def readline() -> str:
+        return next(line_iter, "")
+
+    as_names: list[tuple[int, int, int, str]] = []
+    try:
+        after_as = False
+        for token in tokenize.generate_tokens(readline):
+            if after_as and token.type == tokenize.NAME:
+                as_names.append((token.start[0] - 1, token.start[1], token.end[1], token.string))
+            after_as = token.type == tokenize.NAME and token.string == "as"
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return {}
+
+    anchors: dict[tuple[int, int], tuple[int, int]] = {}
+    for handler in handlers:
+        type_node = handler.type
+        if type_node is None or type_node.end_lineno is None or type_node.end_col_offset is None:
+            continue
+        after_type = (
+            type_node.end_lineno - 1,
+            _codepoint_col(lines, type_node.end_lineno - 1, type_node.end_col_offset),
+        )
+        first_stmt = handler.body[0]
+        before_body = (
+            first_stmt.lineno - 1,
+            _codepoint_col(lines, first_stmt.lineno - 1, first_stmt.col_offset),
+        )
+        matches = [
+            (line0, end_col)
+            for line0, start_col, end_col, name in as_names
+            if name == handler.name
+            and after_type <= (line0, start_col)
+            and (line0, end_col) <= before_body
+        ]
+        if len(matches) != 1:
+            continue
+        line0, end_col = matches[0]
+        anchors[(handler.lineno - 1, handler.col_offset)] = (
+            line0,
+            codepoint_to_utf16(lines[line0], end_col),
+        )
+    return anchors
+
+
 def _collect_structure(source: str):
     """Walk the AST once, mapping source lines to functions/params/attrs/vars.
 
@@ -205,6 +297,16 @@ def _collect_structure(source: str):
     (``type_info.col + len(name)``). ``ast`` hands that anchor over directly, because
     ``ast.Attribute.end_col_offset`` ends at the attribute name rather than at the whole
     ``self.width`` expression, so no arithmetic over the source text is needed.
+
+    Every binding form the server draws a hint on has to be recorded here, because a form
+    that is missing is not a visible failure: its hints simply match no position, and
+    ``resolve_hint_facts`` counts them as drops alongside the usage-site hints it is meant
+    to drop. ``with`` items, ``except`` handlers and comprehension targets were exactly that
+    for a while, and the server emits ``_IOBase`` for ``with io.StringIO() as fh``,
+    ``ValueError`` for ``except ValueError as err`` and ``int`` for the ``q`` of
+    ``[q for q in range(3)]``. Three forms the server draws nothing on are deliberately
+    absent instead, namely ``import x as y``, a ``match`` capture pattern and the starred
+    half of ``a, *rest = ...``.
     """
     def_lines: dict[int, str] = {}
     param_pos: dict[tuple[int, int], tuple[str, str]] = {}
@@ -234,17 +336,49 @@ def _collect_structure(source: str):
             name_pos,
         )
 
+    except_anchors = _except_name_anchors(lines, tree)
+
     def record_assignment(node: ast.AST, enclosing: str | None) -> None:
+        if isinstance(node, ast.ExceptHandler):
+            # The only binding form here whose name is a plain ``str`` with no position of
+            # its own, so its anchor comes from the tokenizing pass above. A handler that
+            # pass could not place unambiguously is absent from the map, and leaving its
+            # hint to the drop counter is the point rather than a shortfall.
+            if node.name is not None:
+                anchor = except_anchors.get((node.lineno - 1, node.col_offset))
+                if anchor is not None:
+                    var_enclosing[anchor[0]] = enclosing
+                    name_pos[anchor] = (enclosing, node.name)
+            return
         targets: list[ast.expr] = []
         if isinstance(node, ast.Assign):
             targets = list(node.targets)
-        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr, ast.For, ast.AsyncFor)):
+        elif isinstance(node, ast.withitem):
+            # ``with open(p) as fh`` and ``with open(p) as self.fh`` both bind, and
+            # ``optional_vars`` is an ``expr`` (a ``Name``, an ``Attribute``, or a ``Tuple``
+            # for ``as (x, y)``), so it needs no handling of its own past this unwrapping.
+            if node.optional_vars is not None:
+                targets = [node.optional_vars]
+        elif isinstance(
+            node,
+            (
+                ast.AnnAssign,
+                ast.AugAssign,
+                ast.NamedExpr,
+                ast.For,
+                ast.AsyncFor,
+                ast.comprehension,
+            ),
+        ):
             # AugAssign and NamedExpr bind a name just as the others do, and the ground
             # truth expects a ``function`` key on those facts. Without them ``n += 1`` and
             # ``(w := f())`` emit the right type on the right line with no enclosing
             # function, and the scorer matches on that key, so the fact never lands.
             # Caveat: a walrus in a def's default arg or decorator is visited with that
             # def's qname, though it really binds in the enclosing scope.
+            # A comprehension target is attributed to the enclosing ``def`` for the same
+            # reason it has to be here at all, namely that the server files it in that
+            # def's ``Scope`` rather than in a scope of the comprehension's own.
             targets = [node.target]
         for target in targets:
             for leaf in _iter_targets(target):
@@ -270,18 +404,31 @@ def _collect_structure(source: str):
                 func_ranges[qname] = (child.lineno - 1, end_lineno - 1)
                 args = child.args
                 names: set[str] = set()
-                for arg in args.posonlyargs + args.args + args.kwonlyargs:
+                # ``vararg``/``kwarg`` belong in this loop and not merely in ``names``.
+                # ``scope.parameters`` carries them, so the server draws a hint on
+                # ``*integers`` and on ``**kwargs``, and TypeEvalPy's ground truth asks for
+                # both by their bare names. Keyed off them only for ``def_params``, those
+                # two hints matched no position and left as drops.
+                for arg in (
+                    *args.posonlyargs,
+                    *args.args,
+                    *args.kwonlyargs,
+                    args.vararg,
+                    args.kwarg,
+                ):
+                    if arg is None:
+                        continue
                     names.add(arg.arg)
                     if arg.arg == "self":
                         continue
                     # The server anchors a param hint at ``col + len(param_name)`` in code
                     # points, so the length is added in code-point space rather than taken
                     # from ``arg.end_col_offset`` (which would run past an annotation).
+                    # ``ast.arg.col_offset`` starts at the identifier rather than at the
+                    # stars of a ``*``/``**`` parameter, which is where the server's own
+                    # ``type_info.col`` starts too.
                     end = _anchor_utf16(lines, arg.lineno - 1, arg.col_offset, len(arg.arg))
                     param_pos[(arg.lineno - 1, end)] = (qname, arg.arg)
-                for extra in (args.vararg, args.kwarg):
-                    if extra is not None:
-                        names.add(extra.arg)
                 def_params[child.lineno - 1] = names
                 visit(child, qname, qname)
             elif isinstance(child, ast.ClassDef):
@@ -581,16 +728,23 @@ async def collect_document(
     the subset that happened to lose something.
 
     The two channels do not admit the same set, so a later accounting of moved evaluation
-    numbers has three named causes to work from rather than an unexplained delta. Facts are
-    lost per binding, because ``Scope.variables`` is a property returning ``types[-1]`` and
-    the server therefore emits one hint per name per scope where ``previewInserts`` reported
-    every binding. Facts are gained on ``global``/``nonlocal`` names, which
-    ``_binding_is_insertable`` filtered out of the insert path and which
-    ``generate_hints_for_scope`` does not filter. And facts are gained wherever LibCST could
-    not have placed the annotation at all, because ``preview_insertions`` in the insertion
-    engine discards the ``failures`` half of ``_create_execution_plans`` and keeps only
-    ``plans``, so a target whose type ``sanitize_type_annotation`` cannot salvage into valid
-    syntax was silently absent from ``will_insert`` and is present here.
+    numbers has named causes to work from rather than an unexplained delta. Facts are gained
+    on ``global``/``nonlocal`` names, which ``_binding_is_insertable`` filtered out of the
+    insert path and which ``generate_hints_for_scope`` does not filter. Facts are gained on
+    comprehension targets for the same shape of reason, because ``_binding_is_insertable``
+    also rejects any binding whose position sits in ``comprehension_target_positions`` and
+    the hint path consults no such set. And facts are gained wherever LibCST could not have
+    placed the annotation at all, because ``preview_insertions`` in the insertion engine
+    discards the ``failures`` half of ``_create_execution_plans`` and keeps only ``plans``,
+    so a target whose type ``sanitize_type_annotation`` cannot salvage into valid syntax was
+    silently absent from ``will_insert`` and is present here.
+
+    A fourth cause stood here until the display caught up with the write path. Facts were
+    lost per binding, because ``Scope.variables`` collapses a name's history to ``types[-1]``
+    and the server drew one hint per name per scope where ``previewInserts`` reported every
+    binding. ``generate_hints_for_scope`` iterates ``variable_history`` now, so that loss is
+    gone, and it is named here only because the branch's own commit messages still carry the
+    old wording and a reader meeting it needs to know which of the two is current.
 
     That last one is where a reader is most likely to go wrong, so it is worth being exact
     about what it is not. **Neither channel ever ran mypy.** ``preview_insertions`` in the
