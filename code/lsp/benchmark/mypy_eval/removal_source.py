@@ -102,6 +102,7 @@ class LspRemovalSource:
         """
         preview = self._bridge.run_sync(self._bridge.client.preview_removals(uri))
         self._reject_handler_error(uri, preview)
+        self._require_preview_fields(uri, preview)
 
         # The client's own early return. ``total_changes`` is the engine's
         # ``removed_count``, so this is exactly "the file carried no annotations".
@@ -135,6 +136,28 @@ class LspRemovalSource:
         message = _field(preview, "message")
         if not _field(preview, "success") and message is not None:
             raise RuntimeError(f"fangtype/previewRemovals failed for {uri}: {message}")
+
+    @staticmethod
+    def _require_preview_fields(uri: str, preview: Any) -> None:
+        """Refuse a preview response that does not carry the two fields the branch reads.
+
+        ``_field`` answers ``None`` for a key that is not there, which is falsey, so an
+        answer missing ``success`` or ``total_changes`` would take the early return below
+        and be recorded as a file with nothing to remove. That is the one shape of failure
+        this whole route exists to rule out. It leaves ``error_file_count`` at zero, so
+        ``_may_stamp`` grants the reuse licence, and the emptied ground truth is served
+        from cache to every run afterwards without anything having failed or been logged.
+
+        Absent raises. Present and falsey does not, because zero changes is the nine
+        unannotated files of the corpus and their stripped text has to stay the source
+        verbatim.
+        """
+        missing = [name for name in ("success", "total_changes") if _field(preview, name) is None]
+        if missing:
+            raise RuntimeError(
+                f"fangtype/previewRemovals answered without {' and '.join(missing)} "
+                f"for {uri}; the response shape has changed and the preview cannot be read"
+            )
 
     def close(self) -> None:
         """Shut the bridge, and with it the server subprocess it started."""
