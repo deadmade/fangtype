@@ -310,9 +310,10 @@ def _collect_structure(source: str):
     to drop. ``with`` items, ``except`` handlers and comprehension targets were exactly that
     for a while, and the server emits ``_IOBase`` for ``with io.StringIO() as fh``,
     ``ValueError`` for ``except ValueError as err`` and ``int`` for the ``q`` of
-    ``[q for q in range(3)]``. Three forms the server draws nothing on are deliberately
-    absent instead, namely ``import x as y``, a ``match`` capture pattern and the starred
-    half of ``a, *rest = ...``.
+    ``[q for q in range(3)]``. The starred half of ``a, *rest = ...`` was the fourth, and
+    it is why ``_iter_targets`` unwraps ``ast.Starred``, since the server draws
+    ``list[int]`` at the anchor past ``rest``. Two forms the server draws nothing on are
+    deliberately absent instead, namely ``import x as y`` and a ``match`` capture pattern.
     """
     def_lines: dict[int, str] = {}
     param_pos: dict[tuple[int, int], tuple[str, str]] = {}
