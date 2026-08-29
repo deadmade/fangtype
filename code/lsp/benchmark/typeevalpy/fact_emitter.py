@@ -74,10 +74,10 @@ def emit_facts(
 
     facts: list[dict] = []
     # (line0, function qname) -> type_str. Hints populate this first; a matching
-    # preview return signal unconditionally overwrites it (preview runs second and
-    # wins), mirroring build_scope_tree's own "preview overwrites hint" precedence.
+    # name_facts return signal unconditionally overwrites it (name_facts runs second
+    # and wins), mirroring build_scope_tree's own "preview overwrites hint" precedence.
     # Facts are only materialized (and Unknown/empty-filtered) once, at the end, so
-    # a def with both a hint and a preview signal yields exactly one return fact.
+    # a def with both a hint and a name_facts signal yields exactly one return fact.
     return_type_str: dict[tuple[int, str], str] = {}
 
     # Parameters + return fallback from inlay hints.
@@ -112,8 +112,8 @@ def emit_facts(
             continue
 
         if name in def_params.get(line0, set()):
-            # Parameter preview entry (sits on the ``def`` line) — parameters are
-            # emitted from inlay hints above; not a local variable. Skip so it does
+            # Parameter entry from name_facts (sits on the ``def`` line) — parameters
+            # are emitted from inlay hints above; not a local variable. Skip so it does
             # not pollute the local_variables bucket.
             continue
 

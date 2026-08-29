@@ -40,10 +40,10 @@ export interface RequestSender {
 }
 
 /**
- * Send one of the five write-path custom requests (`fangtype/insertType`,
- * `fangtype/insertTypesInFile`, `fangtype/previewInserts`, `fangtype/removeTypesInFile`,
- * `fangtype/previewRemovals`) with a timeout, replacing what would otherwise be five inline
- * `Promise.race` calls with one helper.
+ * Send one of the four write-path custom requests (`fangtype/insertType`,
+ * `fangtype/insertTypesInFile`, `fangtype/removeTypesInFile`, `fangtype/previewRemovals`)
+ * with a timeout, replacing what would otherwise be four inline `Promise.race` calls with
+ * one helper.
  *
  * A real `CancellationToken` rides along on `sendRequest`, the same pattern `middleware.ts`
  * uses for stale-request cancellation. Where the server-side handler actually awaits (only
