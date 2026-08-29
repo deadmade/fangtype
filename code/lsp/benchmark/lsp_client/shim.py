@@ -579,6 +579,29 @@ async def collect_document(
     runner can read once at the end. ``on_dropped`` is called for every document, including
     the ones that drop nothing, so the total is a sum over the whole run rather than over
     the subset that happened to lose something.
+
+    The two channels do not admit the same set, so a later accounting of moved evaluation
+    numbers has three named causes to work from rather than an unexplained delta. Facts are
+    lost per binding, because ``Scope.variables`` is a property returning ``types[-1]`` and
+    the server therefore emits one hint per name per scope where ``previewInserts`` reported
+    every binding. Facts are gained on ``global``/``nonlocal`` names, which
+    ``_binding_is_insertable`` filtered out of the insert path and which
+    ``generate_hints_for_scope`` does not filter. And facts are gained wherever LibCST could
+    not have placed the annotation at all, because ``preview_insertions`` in the insertion
+    engine discards the ``failures`` half of ``_create_execution_plans`` and keeps only
+    ``plans``, so a target whose type ``sanitize_type_annotation`` cannot salvage into valid
+    syntax was silently absent from ``will_insert`` and is present here.
+
+    That last one is where a reader is most likely to go wrong, so it is worth being exact
+    about what it is not. **Neither channel ever ran mypy.** ``preview_insertions`` in the
+    workflow passes ``per_binding=True``, which makes ``best_valid`` False, which leaves
+    ``validated_vars`` as ``None`` and builds targets from the raw inferred insertions. The
+    type validator is reached from exactly one place in that file, inside
+    ``_insert_with_assignability_gate``, which the preview path never calls. The naming
+    along that path is what misleads — a local called ``validated_vars`` and an early return
+    reading "all types failed validation" both sit on a branch where no validation happened.
+    The gate is real, but it belongs to insertion, so it never filtered the fact set on
+    either side of this change and it is not a cause of any number that moves.
     """
     if did_open:
         await client.open_document(uri, source)
