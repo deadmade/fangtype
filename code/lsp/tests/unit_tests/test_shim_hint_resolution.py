@@ -10,6 +10,7 @@ no file in either corpus exercises today.
 import asyncio
 
 import pytest
+from lsprotocol import types
 
 from benchmark.lsp_client.shim import _hint_tuples, resolve_hint_facts
 from fangtype.analysis import NameCollector, NameLocation
@@ -104,6 +105,19 @@ CASES = [
         # x, nor suppress the declaration it happens to render identically to.
         [(1, 5, "int", False), (2, 12, "int", False)],
         [("x", "int", 1)],
+        1,
+    ),
+    (
+        "a usage-shaped hint at a return's own anchor still never resolves as a return",
+        "def f():\n    return 1\n",
+        # Same anchor as "return on a single-line def" above, but is_return is False. The
+        # shim's own scraping (_hint_tuples) decides is_return from the label text alone --
+        # whether it starts with "->" -- and a usage hint's label is always f" {type_str}",
+        # so this can never reach the is_return branch regardless of where it sits. Position
+        # disjointness is what protects the variable/attribute/parameter branches; label
+        # shape is what protects this one.
+        [(0, 7, "int", False)],
+        [],
         1,
     ),
     (
@@ -298,16 +312,20 @@ class TestUsageHintsAreDiscriminatedByPosition:
         assert dropped == 1
 
     def test_a_self_read_never_lands_on_the_attribute_it_sets(self, engine) -> None:
-        """Probes the ``get_declaration_positions`` gap named in the task brief.
+        """Corroborates the position-disjointness argument on a genuinely mixed statement.
 
-        ``get_declaration_positions`` covers only ``scope.variables``/``scope.parameters``,
-        never ``scope.attributes`` or a return, so nothing server-side suppresses a usage hint
-        on ``self`` in ``self.width = 3`` — reading the receiver to set an attribute on it is a
-        genuine Load, and Jedi resolves it to the enclosing class. That hint would corrupt a
-        fact only if it anchored at the exact ``(line, char)`` the attribute's own declaration
-        hint uses. It cannot, because the two anchor different identifiers ending at different
-        columns (``self`` ends before the ``.``, ``width`` ends at the statement's end) — this
-        pins that empirically rather than assumes it from reading the AST shapes alone.
+        ``self`` is a *parameter*, not an attribute, so ``get_declaration_positions`` does cover
+        its declaration — at the ``def`` line, where the parameter is bound. Reading ``self`` in
+        ``self.width = 3`` to set an attribute on it is a separate, later Load occurrence at a
+        different ``(line, char)``, which is exactly why ``get_declaration_positions`` (a filter
+        keyed on the declaring occurrence's own position, never on later mentions of the same
+        name) does not suppress it: nothing needs to, since a usage hint at any position other
+        than the declaration's own is legitimate and expected. What has to hold for
+        ``resolve_hint_facts`` is that this legitimate, unsuppressed usage hint still cannot be
+        mistaken for ``width``'s own attribute declaration on the following line — the two anchor
+        different identifiers ending at different columns (``self`` ends before the ``.``,
+        ``width`` ends at the statement's end) — and this pins that empirically rather than
+        assumes it from reading the AST shapes alone.
         """
         source = "class Box:\n    def __init__(self, w):\n        self.width = 3\n"
         helper = InlayHintHelper(NameCollector(), engine, Settings())
@@ -354,3 +372,31 @@ def test_padding_distinguishes_declaration_from_usage_on_the_wire_but_is_not_the
     assert declaration.label == usage.label == " int"
     assert (declaration.padding_left, declaration.padding_right) == (False, False)
     assert (usage.padding_left, usage.padding_right) == (True, True)
+
+
+def test_a_usage_labelled_hint_scrapes_as_non_return_even_at_a_returns_own_position() -> None:
+    """Closes the returns half of the ``get_declaration_positions`` hole at its real mechanism.
+
+    The brief named two gaps in the server's ``get_declaration_positions``, namely
+    ``scope.attributes`` and returns. The attributes half is closed by position disjointness
+    (see ``TestUsageHintsAreDiscriminatedByPosition``), but a return is never looked up by
+    position in the first place -- ``resolve_hint_facts`` routes to its ``is_return`` branch
+    purely on a boolean ``_hint_tuples`` (this module's own scraper) decides from the label
+    text, specifically whether it starts with ``"->"``. A usage hint's label is always
+    ``f" {type_str}"`` (``generate_usage_hints``), which never starts with ``"->"``, so
+    ``_hint_tuples`` scrapes ``is_return=False`` for it regardless of position. This constructs
+    a raw wire hint with a usage-shaped label sitting at the exact ``(line, character)`` a real
+    return hint would use, and pins that it still scrapes as a non-return.
+    """
+    return_anchor_hint = types.InlayHint(
+        position=types.Position(line=0, character=7),
+        label=" int",  # a usage/declaration-shaped label, never "-> int"
+        kind=types.InlayHintKind.Type,
+        padding_left=True,
+        padding_right=True,
+    )
+
+    (line0, char, type_str, is_return) = _hint_tuples([return_anchor_hint])[0]
+
+    assert (line0, char, type_str) == (0, 7, "int")
+    assert is_return is False
