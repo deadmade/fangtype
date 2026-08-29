@@ -7,10 +7,14 @@ anchor shape, and the two non-ASCII cases pin the byte→code-point→UTF-16 con
 no file in either corpus exercises today.
 """
 
+import asyncio
+
 import pytest
 
 from benchmark.lsp_client.shim import _hint_tuples, resolve_hint_facts
+from fangtype.analysis import NameCollector, NameLocation
 from fangtype.utils.inlay_hint_helper import InlayHintHelper
+from fangtype.utils.settings import Settings
 
 # (case id, source, hints, expected facts, expected drop count).
 # Hint columns are UTF-16 anchors just past the bound identifier, exactly as the server emits
@@ -90,6 +94,16 @@ CASES = [
         # invented as a second binding of x.
         [(2, 12, "int", False)],
         [],
+        1,
+    ),
+    (
+        "a declaration and a usage share a label shape, only the declaration resolves",
+        "def f():\n    x = 1\n    return x\n",
+        # Both anchors from the two single-hint cases above, given to one call: a usage hint
+        # sharing " int" with a real declaration must not be mistaken for a second binding of
+        # x, nor suppress the declaration it happens to render identically to.
+        [(1, 5, "int", False), (2, 12, "int", False)],
+        [("x", "int", 1)],
         1,
     ),
     (
@@ -224,3 +238,119 @@ class TestAnchorsAgreeWithTheServer:
 
         assert dropped == 0
         assert ("tötal", "int", 2) in facts
+
+
+class TestUsageHintsAreDiscriminatedByPosition:
+    """A usage hint and a variable declaration hint are character-identical on the wire.
+
+    Both ``_build_type_hint`` (declarations) and ``generate_usage_hints`` (usage sites) render
+    ``f"{sep}{type_str}"`` with a one-space separator, so a hint's *label* carries no signal a
+    consumer could read. ``resolve_hint_facts`` never looks at the label shape for this. It
+    discriminates by position instead, against the Store-target maps ``_collect_structure``
+    builds, which only ever contain binding (Store) occurrences — a usage hint sits at a Load
+    and matches none of them, so it is dropped exactly like any other unresolvable hint. These
+    tests drive that through the real ``InlayHintHelper`` over a live Jedi engine, because a
+    hand-built hint tuple can prove the lookup is correct without proving the server's own
+    declaration and usage hints actually land where the lookup expects.
+    """
+
+    @staticmethod
+    def _declaration_hints(helper: InlayHintHelper, source: str, result) -> list:
+        return [
+            hint
+            for scope in result.scope_tree.scopes_by_id.values()
+            for hint in helper.generate_hints_for_scope(scope, source)
+        ]
+
+    @staticmethod
+    def _usage_hints(helper: InlayHintHelper, source: str, result) -> list:
+        return asyncio.run(
+            helper.process_usage_hints(source, None, 0, len(source.splitlines()), result)
+        )
+
+    def test_a_genuine_read_site_shares_the_declarations_label_but_only_the_declaration_resolves(
+        self, engine
+    ) -> None:
+        """``x``'s declaration and its ``return x`` read both render `` int``, live off Jedi.
+
+        ``f`` also gets its own return-type declaration hint here, since it returns the ``int``
+        ``x`` — that hint is unrelated to the ambiguity under test and is asserted past rather
+        than suppressed, so a future change that dropped it would fail here for the right
+        reason instead of silently narrowing what this test covers.
+        """
+        source = "def f():\n    x = 1\n    return x\n"
+        helper = InlayHintHelper(NameCollector(), engine, Settings())
+        result = engine.infer_types(source)
+
+        declarations = self._declaration_hints(helper, source, result)
+        usages = self._usage_hints(helper, source, result)
+
+        x_declaration = next(h for h in declarations if h.position.line == 1)
+        assert x_declaration.label == " int"
+        assert usages and usages[0].label == " int"
+        assert x_declaration.label == usages[0].label  # identical wire shape, as claimed
+
+        facts, dropped = resolve_hint_facts(source, _hint_tuples(declarations + usages))
+
+        assert ("x", "int", 1) in facts
+        assert ("f", "int", 0) in facts
+        assert len(facts) == 2  # the usage resolves to no third fact
+        assert dropped == 1
+
+    def test_a_self_read_never_lands_on_the_attribute_it_sets(self, engine) -> None:
+        """Probes the ``get_declaration_positions`` gap named in the task brief.
+
+        ``get_declaration_positions`` covers only ``scope.variables``/``scope.parameters``,
+        never ``scope.attributes`` or a return, so nothing server-side suppresses a usage hint
+        on ``self`` in ``self.width = 3`` — reading the receiver to set an attribute on it is a
+        genuine Load, and Jedi resolves it to the enclosing class. That hint would corrupt a
+        fact only if it anchored at the exact ``(line, char)`` the attribute's own declaration
+        hint uses. It cannot, because the two anchor different identifiers ending at different
+        columns (``self`` ends before the ``.``, ``width`` ends at the statement's end) — this
+        pins that empirically rather than assumes it from reading the AST shapes alone.
+        """
+        source = "class Box:\n    def __init__(self, w):\n        self.width = 3\n"
+        helper = InlayHintHelper(NameCollector(), engine, Settings())
+        result = engine.infer_types(source)
+
+        declarations = self._declaration_hints(helper, source, result)
+        usages = self._usage_hints(helper, source, result)
+        assert declarations and usages, "the scenario stopped exercising both hint kinds"
+
+        decl_positions = {(h.position.line, h.position.character) for h in declarations}
+        usage_positions = {(h.position.line, h.position.character) for h in usages}
+        assert decl_positions.isdisjoint(usage_positions), (
+            f"a usage hint landed on a declaration's own anchor: "
+            f"declarations={declarations}, usages={usages}"
+        )
+
+        facts, _dropped = resolve_hint_facts(source, _hint_tuples(declarations + usages))
+        assert ("width", "int", 2) in facts
+
+
+def test_padding_distinguishes_declaration_from_usage_on_the_wire_but_is_not_the_mechanism() -> (
+    None
+):
+    """Corroborating canary, not the classification mechanism.
+
+    ``_build_type_hint`` (declarations) emits ``padding_left=False, padding_right=False``;
+    ``generate_usage_hints`` (usage sites) emits ``True, True``. Reading that one boolean would
+    be less code than the position lookup ``resolve_hint_facts`` actually performs, and the
+    lookup deliberately does not read it. Padding is a cosmetic rendering choice, and a harness
+    keyed on it would silently misclassify every declaration the moment someone adjusted the
+    visual spacing, whereas a hint that matches no Store position is dropped today regardless.
+    If this test ever fails, the server's hint rendering changed, and whoever changed it should
+    read the reasoning above before touching ``resolve_hint_facts``.
+    """
+    helper = InlayHintHelper.__new__(InlayHintHelper)  # bypass the @inject constructor
+
+    declaration = helper._build_type_hint(1, 5, " ", "int", True)
+    usage = helper.generate_usage_hints(
+        [NameLocation(name="x", line=3, col=11, is_definition=False, end_col=12)],
+        {(3, 11): "int"},
+        set(),
+    )[0]
+
+    assert declaration.label == usage.label == " int"
+    assert (declaration.padding_left, declaration.padding_right) == (False, False)
+    assert (usage.padding_left, usage.padding_right) == (True, True)
