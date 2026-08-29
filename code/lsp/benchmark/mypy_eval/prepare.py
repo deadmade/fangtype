@@ -8,18 +8,40 @@ import json
 import platform
 import shutil
 import subprocess
+import sys
 import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import cast
 
 import fangtype.removal
+from benchmark.lsp_client.factory import ClientBridge
 from benchmark.lsp_client.label_parse import as_mapping
 from benchmark.mypy_eval.normalizer import normalize_annotation
-from fangtype.removal import RemovalEngine
+from benchmark.mypy_eval.removal_source import (
+    ClosableRemovalSource,
+    LspRemovalSource,
+    RemovalSource,
+)
 
 _ALWAYS_EXCLUDED_DIRS = frozenset({"__pycache__", ".git"})
 _DEFAULT_EXCLUDE_DIRS = frozenset({"test", "test-data"})
+
+# A file the removal source cannot handle is recorded and the loop moves on, because one
+# odd corpus file is not a reason to abandon the other 142. A run of them is a different
+# fault: the transport is a single server subprocess, so five consecutive failures mean
+# that process is gone or answering a shape this cannot read, and every remaining file
+# would fail the same way. Five rather than one, because a genuinely file-specific defect
+# does not land on five neighbours in a row.
+_MAX_CONSECUTIVE_FAILURES = 5
+
+# The stamp is what lets a later run reuse the tree without rebuilding it, so a partly
+# failed preparation that stamps itself is served from cache forever. The corpus prepares
+# with zero errors today, which makes any error a regression rather than a tolerance to
+# budget for; two percent leaves room for one odd file on the 143-file corpus while a
+# systemic failure never gets stamped. The manifest is still written and returned, so the
+# failure is visible rather than silently retried into the same state.
+_MAX_ERROR_FRACTION = 0.02
 
 
 @dataclass
@@ -373,6 +395,19 @@ def _current_stamp(mypy_dir: Path, file_count: int) -> dict[str, object]:
     }
 
 
+def _may_stamp(error_file_count: int, total_file_count: int) -> bool:
+    """Whether a preparation that hit ``error_file_count`` failures may cache itself.
+
+    The stamp is a promise that the tree beside it is the ground truth every later run
+    may reuse without rebuilding. A preparation that failed on part of the corpus wrote a
+    stripped file that is really the unstripped source, with an empty target list beside
+    it, and stamping that hands the same hole to every run afterwards until someone passes
+    ``force``. Refusing the stamp costs one rebuild and makes the failure recur visibly
+    instead of hardening into the cache.
+    """
+    return error_file_count <= _MAX_ERROR_FRACTION * total_file_count
+
+
 def _load_cached_preparation(workspace: Path, stamp: dict[str, object]) -> MypyPreparationResult:
     """Rebuild the preparation result from a manifest whose stamp already matched."""
     payload = json.loads((workspace / "manifest.json").read_text(encoding="utf-8"))
@@ -453,11 +488,107 @@ def _build_target(entry: object) -> MypyTargetManifest:
     )
 
 
+def _strip_corpus(
+    removal_source: RemovalSource,
+    source_files: list[Path],
+    *,
+    mypy_dir: Path,
+    original_dir: Path,
+    stripped_dir: Path,
+    coldstart_dir: Path,
+) -> tuple[list[MypyFileManifest], int, int]:
+    """Write the original, stripped and cold-start copy of every corpus file.
+
+    A file that fails to strip is not fatal on its own. It is recorded with its own
+    ``preparation_error``, its stripped copy is the unmodified source, and the loop
+    carries on, because one unparseable file should not cost the other 142. A run of
+    consecutive failures is fatal, since the removal source is one server subprocess and a
+    dead or misspeaking one fails every remaining file identically -- continuing would
+    spend the whole corpus producing an empty manifest.
+    """
+    files: list[MypyFileManifest] = []
+    typed_file_count = 0
+    error_file_count = 0
+    consecutive_failures = 0
+
+    for path in source_files:
+        relative_path = path.relative_to(mypy_dir)
+        source = path.read_text(encoding="utf-8")
+        original_target = original_dir / relative_path
+        stripped_target = stripped_dir / relative_path
+        coldstart_target = coldstart_dir / relative_path
+        original_target.parent.mkdir(parents=True, exist_ok=True)
+        stripped_target.parent.mkdir(parents=True, exist_ok=True)
+        coldstart_target.parent.mkdir(parents=True, exist_ok=True)
+        original_target.write_text(source, encoding="utf-8")
+
+        try:
+            # The URI names the corpus file, whose bytes on disk are exactly ``source``,
+            # so an LSP source can read it without the harness opening the document.
+            stripped_source, removal_records = removal_source.strip(path.as_uri(), source)
+            targets = [_build_target(entry) for entry in removal_records]
+            file_manifest = MypyFileManifest(
+                relative_path=str(relative_path),
+                had_annotations=bool(targets),
+                removable_target_count=len(targets),
+                original_sha256=_sha256_text(source),
+                targets=targets,
+            )
+            consecutive_failures = 0
+        except Exception as exc:
+            stripped_source = source
+            error_file_count += 1
+            consecutive_failures += 1
+            file_manifest = MypyFileManifest(
+                relative_path=str(relative_path),
+                had_annotations=False,
+                removable_target_count=0,
+                original_sha256=_sha256_text(source),
+                targets=[],
+                preparation_error=str(exc),
+            )
+
+        if file_manifest.had_annotations:
+            typed_file_count += 1
+
+        stripped_target.write_text(stripped_source, encoding="utf-8")
+        coldstart_target.write_text(stripped_source, encoding="utf-8")
+        files.append(file_manifest)
+
+        if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+            raise RuntimeError(
+                f"prepare: {consecutive_failures} consecutive files failed to strip, "
+                f"the last being {relative_path}; the removal source is not answering, "
+                "so the remaining files would fail the same way"
+            )
+
+    return files, typed_file_count, error_file_count
+
+
+def default_removal_source() -> RemovalSource:
+    """Build the removal source a real preparation run uses, and the server behind it.
+
+    Separated from ``prepare_mypy_workspace`` so a test can swap the transport for the
+    in-process engine with a single monkeypatch, rather than by threading an argument
+    through twenty-six call sites that are about caching and manifest shape and have no
+    opinion about how the stripping reaches the engine.
+
+    ``mypy_enabled=False`` is passed per client rather than through ``set_mypy_gate``,
+    whose mutation is module-level and would still be in force when the evaluation bridge
+    is built later in the same process, silently turning the measured gate off. Removal
+    is a LibCST pass that never consults the validator, so switching it off here cannot
+    move a stripped byte, and it makes a stray ``didOpen`` cost a scheduling round rather
+    than a full mypy run.
+    """
+    return LspRemovalSource(ClientBridge(config_overrides={"mypy_enabled": False}))
+
+
 def prepare_mypy_workspace(
     workspace: Path | None = None,
     *,
     mypy_dir: Path | None = None,
     force: bool = False,
+    removal: RemovalSource | None = None,
 ) -> MypyPreparationResult:
     """Create a stripped mypy workspace and manifest, reusing an intact one.
 
@@ -465,6 +596,12 @@ def prepare_mypy_workspace(
     than it takes to check whether the last one still applies, so a run whose stamp
     matches reads the existing tree instead of rebuilding it. ``force`` rebuilds
     unconditionally.
+
+    ``removal`` names how a file's annotations come off. ``None`` asks
+    ``default_removal_source`` for the LSP route, which is the one the extension takes,
+    and that source is built only once the cache has been ruled out so a reused tree
+    starts no server. A caller that supplies its own source keeps ownership of it and is
+    responsible for closing it.
     """
     mypy_dir = get_mypy_dir(mypy_dir)
     workspace = get_prepared_dir() if workspace is None else workspace
@@ -487,53 +624,22 @@ def prepare_mypy_workspace(
     stripped_dir.mkdir(parents=True, exist_ok=True)
     coldstart_dir.mkdir(parents=True, exist_ok=True)
 
-    files: list[MypyFileManifest] = []
-    typed_file_count = 0
-    error_file_count = 0
-
-    for path in source_files:
-        relative_path = path.relative_to(mypy_dir)
-        source = path.read_text(encoding="utf-8")
-        original_target = original_dir / relative_path
-        stripped_target = stripped_dir / relative_path
-        coldstart_target = coldstart_dir / relative_path
-        original_target.parent.mkdir(parents=True, exist_ok=True)
-        stripped_target.parent.mkdir(parents=True, exist_ok=True)
-        coldstart_target.parent.mkdir(parents=True, exist_ok=True)
-        original_target.write_text(source, encoding="utf-8")
-
-        try:
-            stripped_source, removal_summary = RemovalEngine().remove_types(
-                source,
-                variables=None,
-                include_functions=True,
-            )
-            targets = [_build_target(entry) for entry in removal_summary["will_remove"]]
-            file_manifest = MypyFileManifest(
-                relative_path=str(relative_path),
-                had_annotations=bool(targets),
-                removable_target_count=len(targets),
-                original_sha256=_sha256_text(source),
-                targets=targets,
-            )
-        except Exception as exc:
-            stripped_source = source
-            error_file_count += 1
-            file_manifest = MypyFileManifest(
-                relative_path=str(relative_path),
-                had_annotations=False,
-                removable_target_count=0,
-                original_sha256=_sha256_text(source),
-                targets=[],
-                preparation_error=str(exc),
-            )
-
-        if file_manifest.had_annotations:
-            typed_file_count += 1
-
-        stripped_target.write_text(stripped_source, encoding="utf-8")
-        coldstart_target.write_text(stripped_source, encoding="utf-8")
-        files.append(file_manifest)
+    # Resolved after the cache check, so a reused tree never pays for a server subprocess.
+    owns_removal = removal is None
+    removal_source = default_removal_source() if removal is None else removal
+    try:
+        files, typed_file_count, error_file_count = _strip_corpus(
+            removal_source,
+            source_files,
+            mypy_dir=mypy_dir,
+            original_dir=original_dir,
+            stripped_dir=stripped_dir,
+            coldstart_dir=coldstart_dir,
+        )
+    finally:
+        # Only a source this function built is this function's to shut down.
+        if owns_removal and isinstance(removal_source, ClosableRemovalSource):
+            removal_source.close()
 
     result = MypyPreparationResult(
         mypy_dir=str(mypy_dir),
@@ -555,5 +661,12 @@ def prepare_mypy_workspace(
     del payload["reused"]
     manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     # Written last, so an interrupted prepare leaves no stamp and the next run rebuilds.
-    _stamp_path(workspace).write_text(json.dumps(stamp, indent=2), encoding="utf-8")
+    if _may_stamp(error_file_count, len(files)):
+        _stamp_path(workspace).write_text(json.dumps(stamp, indent=2), encoding="utf-8")
+    else:
+        print(
+            f"prepare: {error_file_count} of {len(files)} files failed to strip; "
+            "refusing to stamp the tree, so the next run rebuilds rather than reusing it",
+            file=sys.stderr,
+        )
     return result

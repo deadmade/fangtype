@@ -32,11 +32,21 @@ def set_mypy_gate(enabled: bool) -> None:
 _DEFAULT_TIMEOUT = 30.0
 
 
-def _bench_configuration_params() -> types.DidChangeConfigurationParams:
+def _bench_configuration_params(
+    overrides: dict[str, Any] | None = None,
+) -> types.DidChangeConfigurationParams:
     """Build the ``workspace/didChangeConfiguration`` params that push the
     benchmark settings to the server.
+
+    ``overrides`` applies to this one client rather than to every client built
+    afterwards, which is what ``set_mypy_gate`` above does. A caller that needs a
+    server configured differently from the run's own configuration -- the corpus
+    preparation bridge, which strips annotations and never inserts one, so the
+    assignability gate is dead weight it would pay a full mypy run per file for --
+    passes it here instead of reaching for the module-level default, whose mutation
+    would leak into every bridge the same process builds later.
     """
-    settings: dict[str, dict[str, Any]] = {"fangtype": dict(_BENCH_CONFIG)}
+    settings: dict[str, dict[str, Any]] = {"fangtype": {**_BENCH_CONFIG, **(overrides or {})}}
     return types.DidChangeConfigurationParams(settings=settings)
 
 
@@ -50,6 +60,7 @@ class FangtypeLspClient:
         timeout: float = _DEFAULT_TIMEOUT,
         cache_home: str | None = None,
         project_root: str | None = None,
+        config_overrides: dict[str, Any] | None = None,
     ) -> None:
         self._engine = engine
         self._root_uri = root_uri
@@ -63,6 +74,9 @@ class FangtypeLspClient:
         self._timeout = timeout
         # Overrides XDG_CACHE_HOME for this server subprocess only; see pool.py for why.
         self._cache_home = cache_home
+        # Per-client settings, layered over ``_BENCH_CONFIG`` at handshake time. Copied so a
+        # caller's dict cannot mutate this client's configuration after the push.
+        self._config_overrides = dict(config_overrides or {})
         self._client = LanguageClient("fangtype-bench", "v1")
         self._docs: dict[str, int] = {}  # uri -> line count (for inlay ranges)
         self._stderr_task: asyncio.Task[None] | None = None
@@ -109,7 +123,9 @@ class FangtypeLspClient:
         )
         self._client.initialized(types.InitializedParams())
 
-        self._client.workspace_did_change_configuration(_bench_configuration_params())
+        self._client.workspace_did_change_configuration(
+            _bench_configuration_params(self._config_overrides)
+        )
 
         self._stderr_task = asyncio.create_task(self._drain_stderr())
 
@@ -168,6 +184,25 @@ class FangtypeLspClient:
 
     async def preview_inserts(self, uri: str) -> Any:
         return await self._custom("fangtype/previewInserts", [uri])
+
+    async def preview_removals(self, uri: str) -> Any:
+        """Ask what a whole-file removal would take out, sending the extension's own vector.
+
+        ``[uri, None, True]`` is ``removeCommands.ts:91`` verbatim, namely no variable
+        filter and function annotations included. The parameters decide what counts as a
+        removable target, so a harness that guessed at them would score against a ground
+        truth no user ever gets.
+        """
+        return await self._custom("fangtype/previewRemovals", [uri, None, True])
+
+    async def remove_types_in_file(self, uri: str) -> Any:
+        """Remove every annotation in the file, sending the extension's own vector.
+
+        ``[uri, None, True]`` is ``removeCommands.ts:134`` verbatim. The response carries
+        the stripped text as a single full-document ``TextEdit``; see
+        ``modified_source_from_edit``.
+        """
+        return await self._custom("fangtype/removeTypesInFile", [uri, None, True])
 
     async def _custom(self, method: str, params: list[Any]) -> Any:
         return await asyncio.wait_for(

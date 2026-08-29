@@ -25,6 +25,7 @@ from benchmark.mypy_eval.prepare import (
     get_run_dir,
     prepare_mypy_workspace,
 )
+from benchmark.mypy_eval.removal_source import InProcessRemovalSource
 from benchmark.mypy_eval.reporter import export_insertion_json
 from benchmark.mypy_eval.reporter import export_json as export_mypy_json
 from benchmark.mypy_eval.runner import MypyBenchmarkResults, MypyGroupSummary
@@ -51,6 +52,21 @@ def corpus(tmp_path: Path) -> Path:
 @pytest.fixture
 def prepared(tmp_path: Path) -> Path:
     return tmp_path / "prepared"
+
+
+@pytest.fixture(autouse=True)
+def in_process_removal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip in-process for every test in this module, so none of them starts a server.
+
+    ``prepare_mypy_workspace`` reaches the removal engine over the two custom requests the
+    VS Code client sends, which means its default source spawns a fangtype-server
+    subprocess. These tests call it twenty-six times and are about the workspace layout,
+    the reuse stamp and the manifest's shape rather than about how the stripping travels,
+    so paying for twenty-six subprocesses would buy them nothing. Patching the factory
+    rather than passing ``removal=`` at every call site keeps the substitution in one
+    place, where it can be read and removed as one thing.
+    """
+    monkeypatch.setattr(prepare_mod, "default_removal_source", InProcessRemovalSource)
 
 
 class TestRunDirectories:
@@ -277,6 +293,76 @@ class TestPreparationInvalidation:
         (prepared / "manifest.json").unlink()
 
         assert prepare_mypy_workspace(prepared, mypy_dir=corpus).reused is False
+
+
+class _FailingRemovalSource:
+    """A removal source that fails on the files named in ``fail_on``, and only those."""
+
+    def __init__(self, fail_on: set[str]) -> None:
+        self._fail_on = fail_on
+
+    def strip(self, uri: str, source: str) -> tuple[str, list[dict[str, object]]]:
+        # Compared on the basename, not with ``endswith``: "typed.py" is a suffix of
+        # "untyped.py", so a suffix match would fail both files of the corpus fixture.
+        if uri.rsplit("/", 1)[-1] in self._fail_on:
+            raise RuntimeError("removal source is not answering")
+        return InProcessRemovalSource().strip(uri, source)
+
+
+class TestPreparationCircuitBreaker:
+    """A preparation that failed must not cache itself, and must not grind on regardless."""
+
+    def test_a_failed_file_is_recorded_but_not_stamped(self, prepared: Path, corpus: Path) -> None:
+        """The stamp is the licence to reuse, so a tree with a hole in it must not get one.
+
+        Before this, a wholesale failure still wrote the stamp, and every later run read
+        the resulting manifest back out of the cache rather than rebuilding.
+        """
+        result = prepare_mypy_workspace(
+            prepared, mypy_dir=corpus, removal=_FailingRemovalSource({"typed.py"})
+        )
+
+        assert result.error_file_count == 1
+        assert (prepared / "manifest.json").exists()
+        assert not (prepared / ".revision").exists()
+
+    def test_an_unstamped_tree_is_rebuilt_rather_than_reused(
+        self, prepared: Path, corpus: Path
+    ) -> None:
+        prepare_mypy_workspace(
+            prepared, mypy_dir=corpus, removal=_FailingRemovalSource({"typed.py"})
+        )
+
+        assert prepare_mypy_workspace(prepared, mypy_dir=corpus).reused is False
+
+    def test_a_failed_file_keeps_its_source_verbatim(self, prepared: Path, corpus: Path) -> None:
+        """The stripped copy of a file that could not be stripped is the original text."""
+        prepare_mypy_workspace(
+            prepared, mypy_dir=corpus, removal=_FailingRemovalSource({"typed.py"})
+        )
+
+        assert (prepared / "stripped" / "typed.py").read_text(encoding="utf-8") == TYPED_SOURCE
+
+    def test_consecutive_failures_abort_the_preparation(
+        self, prepared: Path, tmp_path: Path
+    ) -> None:
+        """One server drives the whole loop, so a run of failures means it is gone.
+
+        Continuing would spend the rest of the corpus writing unstripped files into a
+        manifest with no targets in it, which is the shape a later run would then score
+        against.
+        """
+        corpus = tmp_path / "wide_corpus"
+        corpus.mkdir()
+        names = {f"mod{index}.py" for index in range(6)}
+        for name in names:
+            (corpus / name).write_text(UNTYPED_SOURCE, encoding="utf-8")
+
+        with pytest.raises(RuntimeError, match="consecutive files failed to strip"):
+            prepare_mypy_workspace(prepared, mypy_dir=corpus, removal=_FailingRemovalSource(names))
+
+        assert not (prepared / "manifest.json").exists()
+        assert not (prepared / ".revision").exists()
 
 
 class TestArtefactLabelling:

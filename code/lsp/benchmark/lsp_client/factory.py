@@ -36,6 +36,7 @@ class ClientBridge:
         root_uri: str | None = None,
         timeout: float = 30.0,
         project_root: str | None = None,
+        config_overrides: dict[str, Any] | None = None,
     ) -> None:
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -46,6 +47,7 @@ class ClientBridge:
             timeout=timeout,
             cache_home=bench_cache_home(),
             project_root=project_root,
+            config_overrides=config_overrides,
         )
         self._cache: dict[tuple[str, str], tuple[list, list]] = {}
         self.run_sync(self._client.start())
