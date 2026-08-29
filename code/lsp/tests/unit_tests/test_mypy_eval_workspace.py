@@ -257,14 +257,14 @@ class TestPreparationInvalidation:
     ) -> None:
         """Editing RemovalEngine changes the targets while the corpus stays put."""
         prepare_mypy_workspace(prepared, mypy_dir=corpus)
-        monkeypatch.setattr(prepare_mod, "_stripping_fingerprint", lambda: "different")
+        monkeypatch.setattr(prepare_mod, "_removal_path_fingerprint", lambda: "different")
 
         assert prepare_mypy_workspace(prepared, mypy_dir=corpus).reused is False
 
     def test_older_workspace_layout_invalidates(self, prepared: Path, corpus: Path) -> None:
         """A tree prepared before coldstart/ existed must rebuild rather than be reused.
 
-        The stripping is unchanged by a layout move, so ``_stripping_fingerprint`` cannot
+        The stripping is unchanged by a layout move, so ``_removal_path_fingerprint`` cannot
         see it and the corpus revision cannot either. Without the layout key such a tree
         would be reused with no cold directory in it.
         """
@@ -293,6 +293,79 @@ class TestPreparationInvalidation:
         (prepared / "manifest.json").unlink()
 
         assert prepare_mypy_workspace(prepared, mypy_dir=corpus).reused is False
+
+
+class TestRemovalPathFingerprint:
+    """The cache key must actually see every file it claims to cover.
+
+    Each of the six paths is redirected at a private ``tmp_path`` file through
+    monkeypatch, so a probing edit never touches a file this repository ships. A
+    fingerprint that silently dropped one of the six from its hash would still pass
+    every other test in this module and only fail here.
+    """
+
+    @pytest.mark.parametrize(
+        "edited_label",
+        [
+            "fangtype/removal/engine.py",
+            "fangtype/workflow.py",
+            "fangtype/server.py",
+            "fangtype/utils/lsp_request_helper.py",
+            "benchmark/lsp_client/label_parse.py",
+            "benchmark/mypy_eval/removal_source.py",
+        ],
+    )
+    def test_edit_on_each_covered_path_moves_the_fingerprint(
+        self, edited_label: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        removal_package_dir = tmp_path / "removal_pkg"
+        removal_package_dir.mkdir()
+        (removal_package_dir / "__init__.py").write_text("# init\n", encoding="utf-8")
+        (removal_package_dir / "engine.py").write_text("# engine\n", encoding="utf-8")
+
+        single_files = {
+            "fangtype/workflow.py": tmp_path / "workflow.py",
+            "fangtype/server.py": tmp_path / "server.py",
+            "fangtype/utils/lsp_request_helper.py": tmp_path / "lsp_request_helper.py",
+            "benchmark/lsp_client/label_parse.py": tmp_path / "label_parse.py",
+            "benchmark/mypy_eval/removal_source.py": tmp_path / "removal_source.py",
+        }
+        for path in single_files.values():
+            path.write_text("# original\n", encoding="utf-8")
+
+        monkeypatch.setattr(
+            prepare_mod.fangtype.removal, "__file__", str(removal_package_dir / "__init__.py")
+        )
+        monkeypatch.setattr(
+            prepare_mod.fangtype.workflow, "__file__", str(single_files["fangtype/workflow.py"])
+        )
+        monkeypatch.setattr(
+            prepare_mod.fangtype.server, "__file__", str(single_files["fangtype/server.py"])
+        )
+        monkeypatch.setattr(
+            prepare_mod.fangtype.utils.lsp_request_helper,
+            "__file__",
+            str(single_files["fangtype/utils/lsp_request_helper.py"]),
+        )
+        monkeypatch.setattr(
+            prepare_mod.benchmark.lsp_client.label_parse,
+            "__file__",
+            str(single_files["benchmark/lsp_client/label_parse.py"]),
+        )
+        monkeypatch.setattr(
+            prepare_mod.benchmark.mypy_eval.removal_source,
+            "__file__",
+            str(single_files["benchmark/mypy_eval/removal_source.py"]),
+        )
+
+        baseline = prepare_mod._removal_path_fingerprint()
+
+        if edited_label == "fangtype/removal/engine.py":
+            (removal_package_dir / "engine.py").write_text("# engine, edited\n", encoding="utf-8")
+        else:
+            single_files[edited_label].write_text("# edited\n", encoding="utf-8")
+
+        assert prepare_mod._removal_path_fingerprint() != baseline
 
 
 class _FailingRemovalSource:

@@ -14,7 +14,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import cast
 
+import benchmark.lsp_client.label_parse
+import benchmark.mypy_eval.removal_source
 import fangtype.removal
+import fangtype.server
+import fangtype.utils.lsp_request_helper
+import fangtype.workflow
 from benchmark.lsp_client.factory import ClientBridge
 from benchmark.lsp_client.label_parse import as_mapping
 from benchmark.mypy_eval.normalizer import normalize_annotation
@@ -360,23 +365,56 @@ def build_toolchain_pins() -> dict[str, str]:
     }
 
 
-def _stripping_fingerprint() -> str:
-    """Hash the removal package's sources, so a change to stripping invalidates the cache.
+def _removal_path_fingerprint() -> str:
+    """Hash every file whose contents can change what stripping produces, so a change
+    anywhere on that path invalidates the cache.
 
-    The corpus revision alone is not enough. RemovalEngine decides which annotations
-    become targets, so editing it changes the ground truth while the submodule stays put,
-    and a cache keyed only on the revision would serve a stale stripped tree.
+    Hashing ``fangtype/removal/`` alone was sufficient while preparation called
+    ``RemovalEngine`` in-process. Stripping now leaves that package the way the VS Code
+    client leaves it, over the same wire protocol, so the package's own hash can no
+    longer see a change made anywhere else on that path. The corpus revision cannot see
+    it either, since none of these files live in the submodule. Six things are hashed
+    for that reason, and a change to any one of them can change the stripped bytes while
+    the corpus revision and the removal package's own hash both sit still.
     """
-    package_root = Path(str(fangtype.removal.__file__)).resolve().parent
+    removal_package_root = Path(str(fangtype.removal.__file__)).resolve().parent
+    entries: list[tuple[str, Path]] = [
+        (f"fangtype/removal/{path.relative_to(removal_package_root).as_posix()}", path)
+        # The engine itself. It decides which annotations become removal targets.
+        for path in removal_package_root.rglob("*.py")
+    ]
+    entries.extend(
+        [
+            # remove_types and preview_removals sit between the handler and the engine.
+            ("fangtype/workflow.py", Path(str(fangtype.workflow.__file__)).resolve()),
+            # The two removal handlers reshape the request into the wire response.
+            ("fangtype/server.py", Path(str(fangtype.server.__file__)).resolve()),
+            # build_full_document_workspace_edit is now how the stripped text travels.
+            (
+                "fangtype/utils/lsp_request_helper.py",
+                Path(str(fangtype.utils.lsp_request_helper.__file__)).resolve(),
+            ),
+            # modified_source_from_edit decides the stripped bytes on arrival.
+            (
+                "benchmark/lsp_client/label_parse.py",
+                Path(str(benchmark.lsp_client.label_parse.__file__)).resolve(),
+            ),
+            # Drives both requests and reads the result back into a manifest entry.
+            (
+                "benchmark/mypy_eval/removal_source.py",
+                Path(str(benchmark.mypy_eval.removal_source.__file__)).resolve(),
+            ),
+        ]
+    )
     digest = hashlib.sha256()
-    for path in sorted(package_root.rglob("*.py")):
-        digest.update(path.name.encode("utf-8"))
+    for label, path in sorted(entries, key=lambda entry: entry[0]):
+        digest.update(label.encode("utf-8"))
         digest.update(path.read_bytes())
     return digest.hexdigest()
 
 
 # Bumped whenever the prepared workspace grows or loses a directory. The stripping is
-# unchanged by such a move, so ``_stripping_fingerprint`` cannot see it, and a tree
+# unchanged by such a move, so ``_removal_path_fingerprint`` cannot see it, and a tree
 # prepared before ``coldstart/`` existed would otherwise be reused without it.
 _WORKSPACE_LAYOUT = 2
 
@@ -389,9 +427,13 @@ def _current_stamp(mypy_dir: Path, file_count: int) -> dict[str, object]:
     return {
         "mypy_dir": str(mypy_dir),
         "mypy_revision": read_git_revision(mypy_dir),
-        "stripping_fingerprint": _stripping_fingerprint(),
+        "stripping_fingerprint": _removal_path_fingerprint(),
         "file_count": file_count,
         "layout": _WORKSPACE_LAYOUT,
+        # Preparation used to call RemovalEngine in-process; a tree built that way is
+        # missing the transport-layer bugs LspRemovalSource is meant to surface, so it
+        # must rebuild rather than be served as if it were produced the current way.
+        "prepare_transport": "lsp",
     }
 
 
