@@ -12,7 +12,7 @@ import asyncio
 import pytest
 from lsprotocol import types
 
-from benchmark.lsp_client.shim import _hint_tuples, resolve_hint_facts
+from benchmark.lsp_client.shim import _collect_structure, _hint_tuples, resolve_hint_facts
 from fangtype.analysis import NameCollector, NameLocation
 from fangtype.utils.inlay_hint_helper import InlayHintHelper
 from fangtype.utils.settings import Settings
@@ -144,6 +144,24 @@ CASES = [
         # "def concatenate(**kwargs" ends at column 24.
         [(0, 24, "dict", False)],
         [("kwargs", "dict", 0)],
+        0,
+    ),
+    (
+        "a starred assignment target",
+        "def f(t):\n    *_, suffix = t.split('.')\n    return suffix\n",
+        # "    *_" ends at column 6 and "suffix" at column 14. The star is not part of the
+        # bound name, and the server anchors past the name rather than past the star.
+        [(1, 6, "list[str]", False), (1, 14, "str", False)],
+        [("_", "list[str]", 1), ("suffix", "str", 1)],
+        0,
+    ),
+    (
+        "a self parameter on a module-level function is a real parameter",
+        "def convert(self, cfg):\n    return self\n",
+        # "def convert(self" ends at column 16. Nothing here is a method, so the server draws
+        # a hint the way it would on any other parameter.
+        [(0, 16, "SymbolTable", False)],
+        [("self", "SymbolTable", 0)],
         0,
     ),
     (
@@ -341,6 +359,19 @@ class TestAnchorsAgreeWithTheServer:
         assert ("fh", "_IOBase", 4) in facts
         assert ("err", "ValueError", 8) in facts
         assert ("q", "int", 10) in facts
+
+    def test_a_methods_receiver_is_still_skipped(self, engine) -> None:
+        """The counterpart to the module-level ``self`` case above.
+
+        ``is_implicit_receiver`` is the server's own predicate and it is positional and
+        class-aware, so the shim consults it rather than matching the name. A real method's
+        receiver has to stay out of ``param_pos``, since the server declines to hint it and a
+        stray entry there would be a position waiting to capture some other hint.
+        """
+        source = "class C:\n    def m(self, p):\n        return p\n"
+
+        param_pos = _collect_structure(source)[1]
+        assert not any(param == "self" for _qname, param in param_pos.values())
 
     def test_starred_parameters_round_trip(self, engine) -> None:
         """``*integers`` and ``**kwargs`` are the two the corpus sweep found still dropping.

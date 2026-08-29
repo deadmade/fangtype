@@ -16,6 +16,7 @@ import logging
 import tokenize
 from typing import TYPE_CHECKING
 
+from fangtype.analysis.ast_traversal import is_implicit_receiver
 from fangtype.analysis.types import TypeInfo, TypeSource
 from fangtype.utils.position_encoding import ast_source_lines, byte_to_codepoint, codepoint_to_utf16
 
@@ -161,6 +162,11 @@ def _iter_targets(target: ast.expr) -> list[ast.expr]:
         for elt in target.elts:
             out.extend(_iter_targets(elt))
         return out
+    if isinstance(target, ast.Starred):
+        # ``*rest`` binds ``rest``, and the server anchors its hint on the name inside the
+        # star rather than on the star. Left unwrapped, the ``Starred`` node reached neither
+        # the ``Name`` branch nor the ``Attribute`` branch below and the binding vanished.
+        return _iter_targets(target.value)
     return [target]
 
 
@@ -395,7 +401,7 @@ def _collect_structure(source: str):
                         end = _anchor_utf16(lines, leaf.end_lineno - 1, leaf.end_col_offset)
                         name_pos[(leaf.end_lineno - 1, end)] = (enclosing, leaf.id)
 
-    def visit(node: ast.AST, prefix: str, enclosing_func: str | None) -> None:
+    def visit(node: ast.AST, prefix: str, enclosing_func: str | None, in_class: bool) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 qname = f"{prefix}.{child.name}" if prefix else child.name
@@ -419,7 +425,13 @@ def _collect_structure(source: str):
                     if arg is None:
                         continue
                     names.add(arg.arg)
-                    if arg.arg == "self":
+                    # The server's own predicate, not a match on the name. It is positional
+                    # and class-aware, so a parameter merely called ``self`` in a
+                    # module-level function or a ``staticmethod`` is a real parameter and
+                    # the server draws a hint on it. Skipping by name alone dropped twelve
+                    # such hints in the mypy corpus's own ``exportjson.py``, whose
+                    # ``convert_*`` functions are free functions with a ``self`` parameter.
+                    if is_implicit_receiver(child, arg.arg, in_class=in_class):
                         continue
                     # The server anchors a param hint at ``col + len(param_name)`` in code
                     # points, so the length is added in code-point space rather than taken
@@ -430,15 +442,17 @@ def _collect_structure(source: str):
                     end = _anchor_utf16(lines, arg.lineno - 1, arg.col_offset, len(arg.arg))
                     param_pos[(arg.lineno - 1, end)] = (qname, arg.arg)
                 def_params[child.lineno - 1] = names
-                visit(child, qname, qname)
+                visit(child, qname, qname, in_class=False)
             elif isinstance(child, ast.ClassDef):
                 qname = f"{prefix}.{child.name}" if prefix else child.name
-                visit(child, qname, enclosing_func)
+                visit(child, qname, enclosing_func, in_class=True)
             else:
                 record_assignment(child, enclosing_func)
-                visit(child, prefix, enclosing_func)
+                # ``in_class`` carries through a plain statement, because a ``def`` under an
+                # ``if`` in a class body is still a method whose parent scope is the class.
+                visit(child, prefix, enclosing_func, in_class=in_class)
 
-    visit(tree, "", None)
+    visit(tree, "", None, in_class=False)
     return (
         def_lines,
         param_pos,
