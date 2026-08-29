@@ -31,7 +31,15 @@ class RemovalSource(Protocol):
     ``strip`` returns the stripped text plus one record per removed annotation, already
     normalised to a plain mapping so a caller's ``entry["type"]`` read works the same
     whether the record came from the engine directly or off the wire.
+
+    ``transport`` names the route the stripping took, and it is on this protocol rather
+    than left to the caller because the prepared tree's reuse stamp records it. A tree
+    stripped in-process is missing every transport-layer defect the LSP route exists to
+    surface, so the two trees are not interchangeable and a stamp that could not tell them
+    apart would serve one as if it were the other.
     """
+
+    transport: str
 
     def strip(self, uri: str, source: str) -> tuple[str, list[dict[str, Any]]]:
         """Return ``(stripped_source, removal_records)`` for the file at ``uri``."""
@@ -63,6 +71,8 @@ class InProcessRemovalSource:
     byte-identical.
     """
 
+    transport = "in-process"
+
     def strip(self, uri: str, source: str) -> tuple[str, list[dict[str, Any]]]:
         """Strip ``source``; ``uri`` is ignored, since nothing here reads from disk."""
         stripped_source, summary = RemovalEngine().remove_types(
@@ -90,6 +100,8 @@ class LspRemovalSource:
     ``_run_diagnostics_for_uri``.
     """
 
+    transport = "lsp"
+
     def __init__(self, bridge: ClientBridge) -> None:
         self._bridge = bridge
 
@@ -109,7 +121,7 @@ class LspRemovalSource:
         if not _field(preview, "success") or not _field(preview, "total_changes"):
             return source, []
 
-        records = [as_mapping(entry) for entry in _field(preview, "will_remove") or []]
+        records = [as_mapping(entry) for entry in _field(preview, "will_remove")]
 
         response = self._bridge.run_sync(self._bridge.client.remove_types_in_file(uri))
         stripped_source = modified_source_from_edit(response, uri)
@@ -139,7 +151,7 @@ class LspRemovalSource:
 
     @staticmethod
     def _require_preview_fields(uri: str, preview: Any) -> None:
-        """Refuse a preview response that does not carry the two fields the branch reads.
+        """Refuse a preview response that does not carry the three fields ``strip`` reads.
 
         ``_field`` answers ``None`` for a key that is not there, which is falsey, so an
         answer missing ``success`` or ``total_changes`` would take the early return below
@@ -148,11 +160,22 @@ class LspRemovalSource:
         ``_may_stamp`` grants the reuse licence, and the emptied ground truth is served
         from cache to every run afterwards without anything having failed or been logged.
 
+        ``will_remove`` is checked for the same reason and used to be one field short of it.
+        A response carrying ``total_changes`` above zero but no ``will_remove`` passed both
+        of the other checks, wrote a correctly stripped file, and put an empty target list
+        beside it. That file then scores as having nothing to restore, which is a hole in
+        the ground truth rather than a failure, so nothing raised and the tree stamped
+        itself. Reading the field with ``or []`` was what made that silent.
+
         Absent raises. Present and falsey does not, because zero changes is the nine
         unannotated files of the corpus and their stripped text has to stay the source
-        verbatim.
+        verbatim, and their ``will_remove`` is a present empty list.
         """
-        missing = [name for name in ("success", "total_changes") if _field(preview, name) is None]
+        missing = [
+            name
+            for name in ("success", "total_changes", "will_remove")
+            if _field(preview, name) is None
+        ]
         if missing:
             raise RuntimeError(
                 f"fangtype/previewRemovals answered without {' and '.join(missing)} "

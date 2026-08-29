@@ -283,8 +283,8 @@ def _collect_structure(source: str):
       - var_enclosing: line0 -> enclosing function qname (or None at module level)
       - def_params: def-line0 -> {all param names of that def, incl self/cls and
         ``*args``/``**kwargs``}. A superset of ``param_pos``'s names, keyed by the ``def``
-        line (where preview param entries land) so they can be filtered out of the
-        variable bucket.
+        line, where a parameter's name-keyed fact lands, so they can be filtered out of
+        the variable bucket.
       - func_ranges: qualified_name -> (start_line0, end_line0), inclusive, spanning the
         whole ``def`` body (used to scope an attribute/line lookup to its enclosing method).
       - attr_pos: (line0, end_char) -> (enclosing_qname, bare_attr_name) for every
@@ -520,17 +520,16 @@ def resolve_hint_facts(
 def build_scope_tree(
     source: str,
     hints: list[tuple[int, int, str, bool]],
-    preview: list[tuple[str, str, int]],
+    name_facts: list[tuple[str, str, int]],
 ) -> LspScopeTree:
     """Assemble the facade from scraped inlay hints + the name-keyed facts resolved from them.
 
     Args:
         source: the (already-open) document text.
         hints: scraped inlay hints as ``(line0, char, type_str, is_return)``.
-        preview: name-keyed facts as ``(name, type_str, line0)``, as ``resolve_hint_facts``
-            returns them. The parameter keeps its name from when ``previewInserts`` produced
-            them, and the shape is identical, which is why this function did not move when
-            the producer did.
+        name_facts: name-keyed facts as ``(name, type_str, line0)``, as ``resolve_hint_facts``
+            returns them. The shape is identical to the one ``previewInserts`` used to
+            produce, which is why this function did not move when the producer did.
 
     The name-keyed facts are the source for variables/attributes/returns (unambiguous once
     a name is attached); the raw hints supply parameter types (position-matched to ``def``
@@ -569,12 +568,12 @@ def build_scope_tree(
             scope_for(qname).parameters[param] = _ti(type_str, line0)
 
     # Variables / attributes / returns from the name-keyed facts.
-    for name, type_str, line0 in preview:
+    for name, type_str, line0 in name_facts:
         info = _ti(type_str, line0)
         if line0 in def_lines and def_lines[line0].rsplit(".", 1)[-1] == name:
             scope_for(def_lines[line0]).return_type = info
         elif name in def_params.get(line0, set()):
-            # Parameter preview entry (sits on the ``def`` line) — parameters are
+            # Parameter fact (sits on the ``def`` line) — parameters are
             # already recovered from inlay hints above; not a local variable.
             continue
         elif line0 in attr_lines and name in attr_lines[line0][1]:

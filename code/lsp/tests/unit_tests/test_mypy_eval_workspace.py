@@ -371,6 +371,8 @@ class TestRemovalPathFingerprint:
 class _FailingRemovalSource:
     """A removal source that fails on the files named in ``fail_on``, and only those."""
 
+    transport = "in-process"
+
     def __init__(self, fail_on: set[str]) -> None:
         self._fail_on = fail_on
 
@@ -436,6 +438,70 @@ class TestPreparationCircuitBreaker:
 
         assert not (prepared / "manifest.json").exists()
         assert not (prepared / ".revision").exists()
+
+
+class TestStampRecordsTheStrippingTransport:
+    """A tree stripped in-process and one stripped over LSP are not interchangeable.
+
+    The in-process route reaches ``RemovalEngine`` without crossing the protocol, so it
+    cannot carry any transport-layer defect and the tree it writes is not the ground truth
+    an LSP run would have produced. The stamp is the only thing standing between those two
+    trees, and it used to name ``"lsp"`` unconditionally, which meant it named it of an
+    in-process tree too.
+    """
+
+    def test_an_in_process_preparation_stamps_its_own_transport(
+        self, prepared: Path, corpus: Path
+    ) -> None:
+        prepare_mypy_workspace(prepared, mypy_dir=corpus, removal=InProcessRemovalSource())
+
+        stamp = json.loads((prepared / ".revision").read_text(encoding="utf-8"))
+        assert stamp["prepare_transport"] == "in-process"
+
+    def test_an_lsp_run_rebuilds_rather_than_reusing_an_in_process_tree(
+        self, prepared: Path, corpus: Path
+    ) -> None:
+        prepare_mypy_workspace(prepared, mypy_dir=corpus, removal=InProcessRemovalSource())
+        file_count = len(prepare_mod._iter_python_files(corpus))
+
+        lsp_stamp = prepare_mod._current_stamp(corpus, file_count, "lsp")
+
+        assert prepare_mod._reusable_preparation(prepared, lsp_stamp) is None
+
+
+class TestErrorToleranceBeforeStamping:
+    """Where the two-percent tolerance turns over, checked against a corpus-sized number.
+
+    ``TestPreparationCircuitBreaker`` above only ever drives the refusing branch, because
+    one failure out of the two-file fixture is half the corpus. The branch that tolerates a
+    failure and stamps anyway went untested, and so did the arithmetic that decides how many
+    failures that is.
+    """
+
+    @pytest.mark.parametrize(("errors", "expected"), [(0, True), (2, True), (3, False)])
+    def test_two_failures_out_of_143_still_stamp_and_three_do_not(
+        self, errors: int, expected: bool
+    ) -> None:
+        # 0.02 * 143 is 2.86, so the corpus tolerates two odd files rather than one.
+        assert prepare_mod._may_stamp(errors, 143) is expected
+
+    def test_a_tolerated_failure_still_writes_the_stamp(
+        self, prepared: Path, tmp_path: Path
+    ) -> None:
+        """Driven end to end rather than through the predicate, so the branch that actually
+        writes the stamp after recording a failure is the one that runs."""
+        corpus = tmp_path / "tolerant_corpus"
+        corpus.mkdir()
+        for index in range(100):
+            (corpus / f"mod{index}.py").write_text(UNTYPED_SOURCE, encoding="utf-8")
+        (corpus / "odd.py").write_text(TYPED_SOURCE, encoding="utf-8")
+
+        result = prepare_mypy_workspace(
+            prepared, mypy_dir=corpus, removal=_FailingRemovalSource({"odd.py"})
+        )
+
+        assert result.error_file_count == 1
+        assert (prepared / ".revision").exists()
 
 
 class TestArtefactLabelling:

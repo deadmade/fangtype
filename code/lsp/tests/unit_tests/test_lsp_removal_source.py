@@ -122,9 +122,17 @@ class TestRaisesRatherThanDegrading:
         [
             ({"total_changes": 0, "will_remove": []}, "success"),
             ({"success": False, "will_remove": []}, "total_changes"),
+            ({"success": True, "total_changes": 1}, "will_remove"),
             ({"will_remove": []}, "success and total_changes"),
+            ({}, "success and total_changes and will_remove"),
         ],
-        ids=["no_success", "no_total_changes", "neither"],
+        ids=[
+            "no_success",
+            "no_total_changes",
+            "no_will_remove",
+            "neither_success_nor_total_changes",
+            "none_of_the_three",
+        ],
     )
     def test_a_missing_preview_field_raises(
         self, preview: dict[str, object], expected: str
@@ -133,6 +141,11 @@ class TestRaisesRatherThanDegrading:
 
         That is the silent path: the file lands in the manifest as unannotated, the error
         count stays zero, the stamp is written, and the emptied ground truth is reused.
+
+        ``will_remove`` fails a step later and just as quietly. The early return is not
+        taken, because ``total_changes`` is positive, so the file is stripped correctly and
+        gets an empty target list beside it -- a hole in the ground truth with nothing
+        recorded as having gone wrong.
         """
         bridge = _FakeBridge(preview)
         source = LspRemovalSource(bridge)  # type: ignore[arg-type]
@@ -141,6 +154,13 @@ class TestRaisesRatherThanDegrading:
             source.strip(URI, SOURCE)
 
         assert bridge.calls == ["preview"]
+
+    def test_a_present_but_empty_will_remove_is_not_a_missing_field(self) -> None:
+        """The nine unannotated corpus files answer exactly this, and must not raise."""
+        bridge = _FakeBridge({"success": False, "total_changes": 0, "will_remove": []})
+        source = LspRemovalSource(bridge)  # type: ignore[arg-type]
+
+        assert source.strip(URI, SOURCE) == (SOURCE, [])
 
     def test_no_edit_after_a_positive_preview_raises(self) -> None:
         """The preview promised removals, so an answer carrying no edit is a failure."""

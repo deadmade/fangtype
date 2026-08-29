@@ -43,9 +43,9 @@ _MAX_CONSECUTIVE_FAILURES = 5
 # The stamp is what lets a later run reuse the tree without rebuilding it, so a partly
 # failed preparation that stamps itself is served from cache forever. The corpus prepares
 # with zero errors today, which makes any error a regression rather than a tolerance to
-# budget for; two percent leaves room for one odd file on the 143-file corpus while a
-# systemic failure never gets stamped. The manifest is still written and returned, so the
-# failure is visible rather than silently retried into the same state.
+# budget for. Two percent of the 143-file corpus is 2.86, so it leaves room for two odd
+# files while a systemic failure never gets stamped. The manifest is still written and
+# returned, so the failure is visible rather than silently retried into the same state.
 _MAX_ERROR_FRACTION = 0.02
 
 
@@ -423,17 +423,23 @@ def _stamp_path(workspace: Path) -> Path:
     return workspace / ".revision"
 
 
-def _current_stamp(mypy_dir: Path, file_count: int) -> dict[str, object]:
+def _current_stamp(mypy_dir: Path, file_count: int, transport: str) -> dict[str, object]:
+    """The reuse key for a prepared tree, including the route its stripping took.
+
+    ``transport`` is the removal source's own label rather than a constant, which is the
+    whole point of the field. Preparation used to call RemovalEngine in-process, and a tree
+    built that way is missing the transport-layer bugs LspRemovalSource is meant to surface,
+    so it must rebuild rather than be served as if it were produced the current way. Stamped
+    unconditionally as ``"lsp"``, the field said that of an in-process tree too, which is
+    the one thing it exists to prevent.
+    """
     return {
         "mypy_dir": str(mypy_dir),
         "mypy_revision": read_git_revision(mypy_dir),
         "stripping_fingerprint": _removal_path_fingerprint(),
         "file_count": file_count,
         "layout": _WORKSPACE_LAYOUT,
-        # Preparation used to call RemovalEngine in-process; a tree built that way is
-        # missing the transport-layer bugs LspRemovalSource is meant to surface, so it
-        # must rebuild rather than be served as if it were produced the current way.
-        "prepare_transport": "lsp",
+        "prepare_transport": transport,
     }
 
 
@@ -655,7 +661,15 @@ def prepare_mypy_workspace(
     manifest_path = workspace / "manifest.json"
 
     source_files = _iter_python_files(mypy_dir)
-    stamp = _current_stamp(mypy_dir, len(source_files))
+    # Read off the class rather than off an instance, because the source is built only once
+    # reuse has been ruled out, so that a reused tree never pays for a server subprocess and
+    # the cache lookup needs a transport before then. ``removal is None`` is the route
+    # ``default_removal_source`` takes, which is ``LspRemovalSource``'s. One route past this
+    # remains, namely replacing ``default_removal_source`` itself, which the unit tests do;
+    # each of those writes into a ``tmp_path`` of its own, so none can reach the shared tree
+    # under ``benchmark/tmp`` that the stamp is there to protect.
+    transport = LspRemovalSource.transport if removal is None else removal.transport
+    stamp = _current_stamp(mypy_dir, len(source_files), transport)
     if not force:
         cached = _reusable_preparation(workspace, stamp)
         if cached is not None:

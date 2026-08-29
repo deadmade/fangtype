@@ -53,8 +53,8 @@ class ClientBridge:
         # Run-wide total of inlay hints that resolved to no binding, summed over every
         # document this bridge collected. ``collect_document`` cannot return the count,
         # because four runners unpack its two-element tuple, so it hands it here instead
-        # and a runner reads the total once at the end. A drop nobody counts is an
-        # evaluation number that moves with no cause attached to it.
+        # and ``map_over_bridge`` prints the total once, on its way out. A drop nobody
+        # counts is an evaluation number that moves with no cause attached to it.
         self.dropped_hints = 0
         self.run_sync(self._client.start())
 
@@ -136,6 +136,15 @@ def map_over_bridge[T, R](
     ``on_done(index, item, result)`` runs as each item finishes, for progress output and
     journal appends. It needs no lock now that nothing is concurrent. The bridge is
     closed even if ``fn`` raises.
+
+    The bridge's ``dropped_hints`` total is printed here, on the way out, because this is
+    the one place that owns a bridge from construction to close and every runner reaches the
+    server through it. The counter was built so a silent loss of inference facts would be
+    visible, and until this line nothing read it -- which is how three whole binding forms
+    (``with`` items, ``except`` handlers, comprehension targets) went unresolved for the
+    length of a branch without any run saying so. Printing it unconditionally, rather than
+    only when it is non-zero, is deliberate: a run that reports no drops is itself the
+    signal that the hints all landed.
     """
     results: list[R | None] = [None] * len(items)
     if not items:
@@ -149,5 +158,10 @@ def map_over_bridge[T, R](
             if on_done is not None:
                 on_done(index, item, result)
     finally:
+        print(
+            f"Inlay hints that resolved to no binding: {bridge.dropped_hints} "
+            "(usage-site hints sit at a Load position and are expected here; "
+            "anything else is a fact the scoring never saw)"
+        )
         bridge.close()
     return results

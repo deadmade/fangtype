@@ -75,7 +75,7 @@ def emit_facts(
     facts: list[dict] = []
     # (line0, function qname) -> type_str. Hints populate this first; a matching
     # name_facts return signal unconditionally overwrites it (name_facts runs second
-    # and wins), mirroring build_scope_tree's own "preview overwrites hint" precedence.
+    # and wins), mirroring build_scope_tree's own "name facts overwrite hint" precedence.
     # Facts are only materialized (and Unknown/empty-filtered) once, at the end, so
     # a def with both a hint and a name_facts signal yields exactly one return fact.
     return_type_str: dict[tuple[int, str], str] = {}
