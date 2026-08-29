@@ -61,9 +61,16 @@ def emit_facts(
         attributes, ``"variable"`` (+ ``"function"`` when in-function) for locals).
         No ``"col_offset"`` is emitted -- see ``official.py`` for why.
     """
-    def_lines, param_pos, attr_lines, var_enclosing, def_params, _func_ranges = _collect_structure(
-        source
-    )
+    (
+        def_lines,
+        param_pos,
+        attr_lines,
+        var_enclosing,
+        def_params,
+        _func_ranges,
+        _attr_pos,
+        _name_pos,
+    ) = _collect_structure(source)
 
     facts: list[dict] = []
     # (line0, function qname) -> type_str. Hints populate this first; a matching

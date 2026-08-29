@@ -14,6 +14,7 @@ from __future__ import annotations
 import ast
 
 from fangtype.analysis.types import TypeInfo, TypeSource
+from fangtype.utils.position_encoding import ast_source_lines, byte_to_codepoint, codepoint_to_utf16
 
 
 class LspScope:
@@ -136,10 +137,28 @@ def _iter_targets(target: ast.expr) -> list[ast.expr]:
     return [target]
 
 
+def _anchor_utf16(lines: list[str], line0: int, byte_col: int, extra_codepoints: int = 0) -> int:
+    """Convert an ``ast`` byte column to the UTF-16 column an inlay hint would carry.
+
+    Three encodings meet here. ``ast.col_offset``/``end_col_offset`` are UTF-8 **byte**
+    offsets, the server computes a hint anchor in **code points** (``type_info.col +
+    len(name)``), and it emits the anchor to the client in **UTF-16** code units. Comparing
+    a raw byte column against a hint's character therefore silently mismatches on any line
+    holding a non-ASCII character before the anchor, which would drop the hint as
+    unresolvable rather than fail loudly. ``extra_codepoints`` is added in code-point space,
+    mirroring the server's own ``+ len(name)``.
+    """
+    if not 0 <= line0 < len(lines):
+        return byte_col + extra_codepoints
+    line_text = lines[line0]
+    return codepoint_to_utf16(line_text, byte_to_codepoint(line_text, byte_col) + extra_codepoints)
+
+
 def _collect_structure(source: str):
     """Walk the AST once, mapping source lines to functions/params/attrs/vars.
 
-    Returns (def_lines, param_pos, attr_lines, var_enclosing, def_params, func_ranges):
+    Returns (def_lines, param_pos, attr_lines, var_enclosing, def_params, func_ranges,
+    attr_pos, name_pos):
       - def_lines: line0 -> qualified function name (of the ``def`` on that line)
       - param_pos: (line0, end_char) -> (qualified_name, param_name)
       - attr_lines: line0 -> (enclosing_qname, {attr names assigned via self.X})
@@ -150,6 +169,16 @@ def _collect_structure(source: str):
         variable bucket.
       - func_ranges: qualified_name -> (start_line0, end_line0), inclusive, spanning the
         whole ``def`` body (used to scope an attribute/line lookup to its enclosing method).
+      - attr_pos: (line0, end_char) -> (enclosing_qname, bare_attr_name) for every
+        ``self.x``-style store target
+      - name_pos: (line0, end_char) -> (enclosing_qname_or_None, name) for every plain-name
+        store target
+
+    The three position maps share one key space, namely the UTF-16 column just past the end
+    of the bound identifier, which is exactly where the server anchors a declaration hint
+    (``type_info.col + len(name)``). ``ast`` hands that anchor over directly, because
+    ``ast.Attribute.end_col_offset`` ends at the attribute name rather than at the whole
+    ``self.width`` expression, so no arithmetic over the source text is needed.
     """
     def_lines: dict[int, str] = {}
     param_pos: dict[tuple[int, int], tuple[str, str]] = {}
@@ -157,11 +186,27 @@ def _collect_structure(source: str):
     var_enclosing: dict[int, str | None] = {}
     def_params: dict[int, set[str]] = {}
     func_ranges: dict[str, tuple[int, int]] = {}
+    attr_pos: dict[tuple[int, int], tuple[str | None, str]] = {}
+    name_pos: dict[tuple[int, int], tuple[str | None, str]] = {}
+
+    # ast_source_lines, never str.splitlines(): the tokenizer breaks lines only on \n, \r and
+    # \r\n, while splitlines() also breaks on \v, \f, U+2028 and more, which would desync
+    # these indices from node.lineno and convert every later column against the wrong line.
+    lines = ast_source_lines(source)
 
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        return def_lines, param_pos, attr_lines, var_enclosing, def_params, func_ranges
+        return (
+            def_lines,
+            param_pos,
+            attr_lines,
+            var_enclosing,
+            def_params,
+            func_ranges,
+            attr_pos,
+            name_pos,
+        )
 
     def record_assignment(node: ast.AST, enclosing: str | None) -> None:
         targets: list[ast.expr] = []
@@ -181,8 +226,14 @@ def _collect_structure(source: str):
                     enc, names = attr_lines.get(leaf.lineno - 1, (enclosing, set()))
                     names.add(leaf.attr)
                     attr_lines[leaf.lineno - 1] = (enc, names)
+                    if leaf.end_lineno is not None and leaf.end_col_offset is not None:
+                        end = _anchor_utf16(lines, leaf.end_lineno - 1, leaf.end_col_offset)
+                        attr_pos[(leaf.end_lineno - 1, end)] = (enclosing, leaf.attr)
                 elif isinstance(leaf, ast.Name):
                     var_enclosing[leaf.lineno - 1] = enclosing
+                    if leaf.end_lineno is not None and leaf.end_col_offset is not None:
+                        end = _anchor_utf16(lines, leaf.end_lineno - 1, leaf.end_col_offset)
+                        name_pos[(leaf.end_lineno - 1, end)] = (enclosing, leaf.id)
 
     def visit(node: ast.AST, prefix: str, enclosing_func: str | None) -> None:
         for child in ast.iter_child_nodes(node):
@@ -197,7 +248,10 @@ def _collect_structure(source: str):
                     names.add(arg.arg)
                     if arg.arg == "self":
                         continue
-                    end = arg.col_offset + len(arg.arg)
+                    # The server anchors a param hint at ``col + len(param_name)`` in code
+                    # points, so the length is added in code-point space rather than taken
+                    # from ``arg.end_col_offset`` (which would run past an annotation).
+                    end = _anchor_utf16(lines, arg.lineno - 1, arg.col_offset, len(arg.arg))
                     param_pos[(arg.lineno - 1, end)] = (qname, arg.arg)
                 for extra in (args.vararg, args.kwarg):
                     if extra is not None:
@@ -212,7 +266,72 @@ def _collect_structure(source: str):
                 visit(child, prefix, enclosing_func)
 
     visit(tree, "", None)
-    return def_lines, param_pos, attr_lines, var_enclosing, def_params, func_ranges
+    return (
+        def_lines,
+        param_pos,
+        attr_lines,
+        var_enclosing,
+        def_params,
+        func_ranges,
+        attr_pos,
+        name_pos,
+    )
+
+
+def resolve_hint_facts(
+    source: str, hints: list[tuple[int, int, str, bool]]
+) -> tuple[list[tuple[str, str, int]], int]:
+    """Resolve position-keyed inlay hints back to the name-keyed facts the runners score.
+
+    Inlay hints are how the extension actually surfaces inference to a developer, so they
+    are the honest fact source, but they carry a position and a rendered type and no name at
+    all. Every declaration hint anchors just past the end of the identifier it annotates,
+    which is the one property that makes the inverse mapping exact rather than a guess.
+
+    Args:
+        source: the document text the hints were produced for.
+        hints: scraped inlay hints as ``(line0, char, type_str, is_return)``.
+
+    Returns:
+        ``(facts, dropped)``. ``facts`` is ``(name, type_str, line0)`` — deliberately the
+        same shape ``_preview_tuples`` returns, so a consumer cannot tell which channel
+        produced it. A parameter and a return both carry the ``def`` line, matching what
+        ``previewInserts`` reported for them. ``dropped`` counts the hints that matched no
+        store position, which is every usage-site hint (those sit at a Load position) plus a
+        return on a wrapped signature, whose anchor is the closing-paren line.
+    """
+    (
+        def_lines,
+        param_pos,
+        _attr_lines,
+        _var_enclosing,
+        _def_params,
+        func_ranges,
+        attr_pos,
+        name_pos,
+    ) = _collect_structure(source)
+
+    facts: list[tuple[str, str, int]] = []
+    dropped = 0
+    for line0, char, type_str, is_return in hints:
+        key = (line0, char)
+        if is_return:
+            qname = def_lines.get(line0)
+            if qname is None:
+                dropped += 1
+                continue
+            facts.append((qname.rsplit(".", 1)[-1], type_str, line0))
+        elif key in param_pos:
+            qname, param = param_pos[key]
+            def_line0 = func_ranges.get(qname, (line0, line0))[0]
+            facts.append((param, type_str, def_line0))
+        elif key in attr_pos:
+            facts.append((attr_pos[key][1], type_str, line0))
+        elif key in name_pos:
+            facts.append((name_pos[key][1], type_str, line0))
+        else:
+            dropped += 1
+    return facts, dropped
 
 
 def build_scope_tree(
@@ -231,9 +350,16 @@ def build_scope_tree(
     (name-keyed, unambiguous); inlay hints supply parameter types (position-matched
     to ``def`` param positions) and a return-type fallback.
     """
-    def_lines, param_pos, attr_lines, _var_enclosing, def_params, func_ranges = _collect_structure(
-        source
-    )
+    (
+        def_lines,
+        param_pos,
+        attr_lines,
+        _var_enclosing,
+        def_params,
+        func_ranges,
+        _attr_pos,
+        _name_pos,
+    ) = _collect_structure(source)
 
     variables: dict[str, list[tuple[int, TypeInfo]]] = {}
     functions: dict[str, LspScope] = {}
