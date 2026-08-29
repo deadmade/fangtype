@@ -389,33 +389,6 @@ async def test_insert_types_in_file_attribute_only_success(lsp_server: FangtypeS
     assert result["inserted_count"] == 1
 
 
-async def test_preview_inserts_success(lsp_server: FangtypeServer) -> None:
-    workflow = MagicMock()
-    workflow.preview_insertions = AsyncMock(
-        return_value={
-            "will_insert": [{"variable": "x", "type": "int", "line": 2}],
-            "total_changes": 2,
-        }
-    )
-    lsp_server.workflow = workflow
-
-    ls = _fake_ls(
-        workspace=FakeWorkspace({"file:///test.py": _make_doc("file:///test.py", "x = 1\n")})
-    )
-
-    result = await lsp_server.preview_inserts(ls, ["file:///test.py"])
-
-    assert result["success"] is True
-    assert result["total_changes"] == 2
-    assert result["will_insert"]
-    assert result["will_insert"][0]["variable"] == "x"
-    assert result["will_insert"][0]["type"] == "int"
-
-    passed = workflow.preview_insertions.call_args.kwargs["cancel_token"]
-    assert passed is not None
-    assert passed.cancelled() is False
-
-
 # Task C1: on cancel, handlers cancel the per-request token; same token reads cancelled()==True.
 
 
@@ -455,11 +428,6 @@ async def test_inlay_hints_cancel_cancels_token(
             "insert_all_types",
             lambda s, ls: s.insert_types_in_file(ls, ["file:///test.py"]),
             id="insert_types_in_file",
-        ),
-        pytest.param(
-            "preview_insertions",
-            lambda s, ls: s.preview_inserts(ls, ["file:///test.py"]),
-            id="preview_inserts",
         ),
     ],
 )

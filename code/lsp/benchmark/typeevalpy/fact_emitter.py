@@ -41,7 +41,7 @@ def _is_meaningful(types: list[str]) -> bool:
 def emit_facts(
     source: str,
     hints: list[tuple[int, int, str, bool]],
-    preview: list[tuple[str, str, int]],
+    name_facts: list[tuple[str, str, int]],
     *,
     filename: str,
 ) -> list[dict]:
@@ -50,7 +50,7 @@ def emit_facts(
     Args:
         source: the document text (used to recover def/param/attribute structure).
         hints: scraped inlay hints as ``(line0, char, type_str, is_return)``.
-        preview: previewInserts entries as ``(name, type_str, line0)``.
+        name_facts: name-keyed facts resolved from inlay hints, as ``(name, type_str, line0)``.
         filename: the ``"file"`` value to stamp on every emitted fact.
 
     Returns:
@@ -105,8 +105,8 @@ def emit_facts(
                     }
                 )
 
-    # Returns / attributes / locals from previewInserts (name-keyed).
-    for name, type_str, line0 in preview:
+    # Returns / attributes / locals from the name-keyed facts resolved from inlay hints.
+    for name, type_str, line0 in name_facts:
         if line0 in def_lines and def_lines[line0].rsplit(".", 1)[-1] == name:
             return_type_str[(line0, def_lines[line0])] = type_str
             continue

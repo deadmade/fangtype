@@ -224,43 +224,6 @@ class TypeAnnotationWorkflow:
         # Unreachable: survivors strictly shrink each pass, so the loop always returns above.
         raise AssertionError("assignability gate failed to converge")
 
-    async def preview_insertions(
-        self,
-        source: str,
-        file_path: str | None = None,
-        cancel_token: CancellationToken | None = None,
-        uri: str | None = None,
-        version: int | None = None,
-    ) -> dict[str, object]:
-        """Preview insertions as client-ready data: {"will_insert": [...], "total_changes": int}."""
-        targets, _, _, early_msg, _ = await self._prepare_insertion_targets(
-            source, file_path, cancel_token=cancel_token, uri=uri, version=version, per_binding=True
-        )
-
-        if early_msg is not None or not targets:
-            return {"will_insert": [], "total_changes": 0}
-
-        engine_preview = self._insertion_engine.preview_insertions(targets, source)
-        total = engine_preview.get("total_plans", 0)
-
-        # preview_insertions returns a heterogeneous dict (or {"error": ...}); narrow first.
-        plan_details = engine_preview.get("plan_details", [])
-        will_insert: list[dict[str, object]] = []
-        if isinstance(plan_details, list):
-            for plan in plan_details:
-                if not isinstance(plan, dict):
-                    continue
-                variable = plan.get("target") or plan.get("variable")
-                type_str = plan.get("type")
-                if variable is None or type_str is None:
-                    continue
-                entry: dict[str, object] = {"variable": variable, "type": type_str}
-                if "line" in plan:
-                    entry["line"] = plan["line"]
-                will_insert.append(entry)
-
-        return {"will_insert": will_insert, "total_changes": total}
-
     async def annotate_at_position(
         self,
         source: str,
@@ -407,7 +370,7 @@ class TypeAnnotationWorkflow:
         # Same for signatures, keyed (line0, func_name, param_name) with "return" for the return.
         function_import_hints = inference_result.get_function_import_hints()
 
-        # 2a. Variables: full-file insert picks most-recent valid binding/name; preview/cursor: rep.
+        # 2a. Variables: full-file insert picks most-recent valid binding/name; action/cursor: rep.
         best_valid = only is None and not per_binding
         variable_insertions: dict[tuple[int, str], str] = {}
         variable_candidates: dict[tuple[str, str], list[tuple[int, str]]] = {}

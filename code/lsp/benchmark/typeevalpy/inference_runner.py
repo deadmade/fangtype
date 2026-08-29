@@ -136,8 +136,8 @@ def run_predictions(
         py_path, _gt_path = pair
         source = py_path.read_text()
         uri = py_path.resolve().as_uri()
-        hints, preview = bridge.collect_sync(uri, source, did_open=False)
-        facts = emit_facts(source, hints, preview, filename=py_path.name)
+        hints, name_facts = bridge.collect_sync(uri, source, did_open=False)
+        facts = emit_facts(source, hints, name_facts, filename=py_path.name)
         facts = official.sort_facts(facts)
 
         result_path = _result_path(py_path, out_root)

@@ -297,6 +297,23 @@ class TestInsertAllTypes:
         assert source == "modified"
         assert "Inserted 1 type annotations" in msg
 
+    async def test_insert_all_types_uses_candidate_enumerator_not_per_binding(
+        self,
+        workflow: TypeAnnotationWorkflow,
+        bare_inference_engine: MagicMock,
+    ) -> None:
+        """Insert uses get_variable_insertion_candidates (one per name), never per_binding."""
+        mock_inference_result = MagicMock()
+        mock_inference_result.get_variable_insertion_candidates.return_value = {}
+        mock_inference_result.get_function_insertions.return_value = {}
+        mock_inference_result.get_attribute_insertions.return_value = {}
+        bare_inference_engine.infer_types.return_value = mock_inference_result
+
+        await workflow.insert_all_types("source", "file.py")
+
+        mock_inference_result.get_variable_insertion_candidates.assert_called_once_with()
+        mock_inference_result.get_variable_insertions.assert_not_called()
+
 
 class TestVariableDropReasons:
     """Bucketing surfaced variables into selected vs all_mypy_invalid (folded into insert path)."""
@@ -383,107 +400,6 @@ class TestBuildTargetsSelfAttribute:
         attr_targets = [t for t in targets if t.target_type == TargetType.ATTRIBUTE_ACCESS]
         assert len(attr_targets) == 1
         assert attr_targets[0].name == "obj.x"
-
-
-class TestPreviewInsertions:
-    """Tests for preview_insertions."""
-
-    async def test_preview_insertions_success(
-        self,
-        workflow: TypeAnnotationWorkflow,
-        bare_inference_engine: MagicMock,
-        bare_type_validator: MagicMock,
-        bare_insertion_engine: MagicMock,
-    ) -> None:
-        """Test successful preview."""
-        mock_inference_result = MagicMock()
-        mock_inference_result.get_variable_insertions.return_value = {(0, "x"): "int"}
-        mock_inference_result.get_function_insertions.return_value = {}
-        mock_inference_result.get_attribute_insertions.return_value = {}
-        bare_inference_engine.infer_types.return_value = mock_inference_result
-
-        bare_type_validator.validate_bulk.return_value = {(0, "x"): _validation_result("int", True)}
-
-        bare_insertion_engine.preview_insertions.return_value = {
-            "success": True,
-            "total_plans": 1,
-            "plan_details": [{"target": "x", "type": "int"}],
-        }
-
-        preview = await workflow.preview_insertions("source")
-        assert preview == {"will_insert": [{"variable": "x", "type": "int"}], "total_changes": 1}
-
-    async def test_preview_insertions_skips_validation_when_mypy_disabled(
-        self,
-        workflow: TypeAnnotationWorkflow,
-        bare_inference_engine: MagicMock,
-        bare_type_validator: MagicMock,
-        bare_insertion_engine: MagicMock,
-    ) -> None:
-        """preview_insertions also skips mypy validation when disabled (benchmark scope tree)."""
-
-        mock_inference_result = MagicMock()
-        mock_inference_result.get_variable_insertions.return_value = {(0, "x"): "int"}
-        mock_inference_result.get_function_insertions.return_value = {}
-        mock_inference_result.get_attribute_insertions.return_value = {}
-        bare_inference_engine.infer_types.return_value = mock_inference_result
-
-        bare_insertion_engine.preview_insertions.return_value = {
-            "success": True,
-            "total_plans": 1,
-            "plan_details": [{"target": "x", "type": "int"}],
-        }
-
-        preview = await workflow.preview_insertions("source")
-
-        bare_type_validator.validate_bulk.assert_not_awaited()
-        assert preview == {"will_insert": [{"variable": "x", "type": "int"}], "total_changes": 1}
-
-    async def test_preview_insertions_requests_per_binding_variables(
-        self,
-        workflow: TypeAnnotationWorkflow,
-        bare_inference_engine: MagicMock,
-    ) -> None:
-        """Preview reports every assignment site, so it requests per-binding variables."""
-        mock_inference_result = MagicMock()
-        mock_inference_result.get_variable_insertions.return_value = {}
-        mock_inference_result.get_function_insertions.return_value = {}
-        mock_inference_result.get_attribute_insertions.return_value = {}
-        bare_inference_engine.infer_types.return_value = mock_inference_result
-
-        await workflow.preview_insertions("source")
-
-        mock_inference_result.get_variable_insertions.assert_called_once_with(per_binding=True)
-
-    async def test_insert_all_types_uses_candidate_enumerator_not_per_binding(
-        self,
-        workflow: TypeAnnotationWorkflow,
-        bare_inference_engine: MagicMock,
-    ) -> None:
-        """Insert uses get_variable_insertion_candidates (one per name), never per_binding."""
-        mock_inference_result = MagicMock()
-        mock_inference_result.get_variable_insertion_candidates.return_value = {}
-        mock_inference_result.get_function_insertions.return_value = {}
-        mock_inference_result.get_attribute_insertions.return_value = {}
-        bare_inference_engine.infer_types.return_value = mock_inference_result
-
-        await workflow.insert_all_types("source", "file.py")
-
-        mock_inference_result.get_variable_insertion_candidates.assert_called_once_with()
-        mock_inference_result.get_variable_insertions.assert_not_called()
-
-    async def test_preview_insertions_no_types(
-        self, workflow: TypeAnnotationWorkflow, bare_inference_engine: MagicMock
-    ) -> None:
-        """Test preview when no types inferred."""
-        mock_inference_result = MagicMock()
-        mock_inference_result.get_variable_insertions.return_value = {}
-        mock_inference_result.get_function_insertions.return_value = {}
-        mock_inference_result.get_attribute_insertions.return_value = {}
-        bare_inference_engine.infer_types.return_value = mock_inference_result
-
-        preview = await workflow.preview_insertions("source")
-        assert preview == {"will_insert": [], "total_changes": 0}
 
 
 class TestTypeCollection:

@@ -333,8 +333,8 @@ def _evaluate_file(
     try:
         current_source = (stripped_dir / file_manifest.relative_path).read_text(encoding="utf-8")
         uri = (uri_base / file_manifest.relative_path).as_uri()
-        hints, preview = bridge.collect_sync(uri, current_source, did_open=True)
-        tree = build_scope_tree(current_source, hints, preview)
+        hints, name_facts = bridge.collect_sync(uri, current_source, did_open=True)
+        tree = build_scope_tree(current_source, hints, name_facts)
 
         # Per-target classification stays inside the guard: a rare resolve/validate failure records
         # this one file as RUN_ERROR (keeping its targets in the denominator) instead of aborting

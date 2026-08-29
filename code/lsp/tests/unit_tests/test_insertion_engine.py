@@ -129,28 +129,6 @@ class TestInsertionEngine:
         assert "x: int = 42" in result.modified_source
         assert "y: str = 'hello'" in result.modified_source
 
-    def test_preview_insertions(self) -> None:
-        """Test preview functionality."""
-        engine = InsertionEngine()
-
-        source = "x = 42\n"
-        targets = [
-            InsertionTarget(
-                target_type=TargetType.VARIABLE_SIMPLE,
-                location=CodeLocation(line=1, column=0),
-                type_annotation="int",
-                name="x",
-            ),
-        ]
-
-        preview = engine.preview_insertions(targets, source)
-
-        assert preview["total_plans"] == 1
-        by_strategy = preview["plans_by_strategy"]
-        assert isinstance(by_strategy, dict)
-        assert "variable_assignment" in by_strategy
-        assert by_strategy["variable_assignment"] == 1
-
     def test_invalid_type_annotation(self) -> None:
         """Test handling of invalid type annotations."""
         engine = InsertionEngine()

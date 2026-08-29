@@ -175,8 +175,8 @@ def _insert_one(bridge: ClientBridge, pair: tuple[Path, Path], _index: int) -> _
     py_path, _gt_path = pair
     source = py_path.read_text()
     uri = py_path.resolve().as_uri()
-    hints, preview = bridge.collect_sync(uri, source, did_open=False)
-    candidates = emit_facts(source, hints, preview, filename=py_path.name)
+    hints, name_facts = bridge.collect_sync(uri, source, did_open=False)
+    candidates = emit_facts(source, hints, name_facts, filename=py_path.name)
 
     try:
         _ok, modified = bridge.run_sync(insert_all(bridge.client, uri))

@@ -88,12 +88,6 @@ def mock_insertion_engine() -> MagicMock:
     mock_result.failed_targets = []
 
     mock.insert.return_value = mock_result
-    mock.preview_insertions.return_value = {
-        "success": True,
-        "total_plans": 0,
-        "plans_by_strategy": {},
-        "plan_details": [],
-    }
 
     return mock
 

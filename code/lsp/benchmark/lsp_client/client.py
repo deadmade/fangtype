@@ -182,9 +182,6 @@ class FangtypeLspClient:
     async def insert_types_in_file(self, uri: str) -> Any:
         return await self._custom("fangtype/insertTypesInFile", [uri])
 
-    async def preview_inserts(self, uri: str) -> Any:
-        return await self._custom("fangtype/previewInserts", [uri])
-
     async def preview_removals(self, uri: str) -> Any:
         """Ask what a whole-file removal would take out, sending the extension's own vector.
 

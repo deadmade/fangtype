@@ -334,8 +334,8 @@ def _insert_file(
         # is still the annotated original), matching the insert call below and the
         # restoration path. This is a second inference pass; the server's DocumentCache
         # absorbs most of the cost when the (uri, version) matches the insert call.
-        hints, preview = bridge.collect_sync(uri, stripped_source, did_open=True)
-        candidates = emit_facts(stripped_source, hints, preview, filename=Path(rel).name)
+        hints, name_facts = bridge.collect_sync(uri, stripped_source, did_open=True)
+        candidates = emit_facts(stripped_source, hints, name_facts, filename=Path(rel).name)
         inferred_counts = _category_counts(candidates)
         inferred_distinct_counts = _distinct_name_counts(candidates)
 

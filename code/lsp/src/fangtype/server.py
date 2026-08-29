@@ -126,7 +126,6 @@ class FangtypeServer(LanguageServer):
         self._register(types.TEXT_DOCUMENT_DID_CLOSE, self.did_close)
         self._register("fangtype/insertType", self.insert_type)
         self._register("fangtype/insertTypesInFile", self.insert_types_in_file)
-        self._register("fangtype/previewInserts", self.preview_inserts)
         self._register("fangtype/removeTypesInFile", self.remove_types_in_file)
         self._register("fangtype/previewRemovals", self.preview_removals)
         self._register(types.TEXT_DOCUMENT_CODE_ACTION, self.code_actions)
@@ -431,55 +430,6 @@ class FangtypeServer(LanguageServer):
                 "success": False,
                 "message": f"Internal error: {e!s}",
                 "inserted_count": 0,
-            }
-
-    async def preview_inserts(self, ls: LanguageServer, params: list[Any]) -> dict[str, Any]:
-        """Preview insertions (params [uri]); returns {success, will_insert, total_changes}."""
-        # Cancel token built before try so it's in scope in the except; a cancel stops the worker.
-        cancel_token = CancellationToken()
-
-        try:
-            doc_context, _ = extract_uri_and_context(ls, params)
-            uri = doc_context.uri
-            logger.info(f"Preview inserts request for {uri}")
-
-            source: str = doc_context.source
-            file_path: str = doc_context.file_path
-
-            # Use workflow for preview (async)
-            workflow = self.workflow
-            preview: dict[str, Any] = await workflow.preview_insertions(
-                source,
-                file_path,
-                cancel_token=cancel_token,
-                uri=doc_context.uri,
-                version=doc_context.version,
-            )
-
-            logger.info(f"Preview: {preview['total_changes']} insertions")
-
-            return {
-                "success": True,
-                "will_insert": preview["will_insert"],
-                "total_changes": preview["total_changes"],
-            }
-
-        except asyncio.CancelledError:
-            cancel_token.cancel()
-            logger.info("Preview inserts cancelled by client")
-            return {
-                "success": False,
-                "will_insert": [],
-                "total_changes": 0,
-                "message": "Preview cancelled by user",
-            }
-        except Exception as e:
-            logger.error(f"Error in preview_inserts: {e}", exc_info=True)
-            return {
-                "success": False,
-                "will_insert": [],
-                "total_changes": 0,
-                "message": f"Internal error: {e!s}",
             }
 
     async def remove_types_in_file(self, ls: LanguageServer, params: Any) -> dict[str, Any]:

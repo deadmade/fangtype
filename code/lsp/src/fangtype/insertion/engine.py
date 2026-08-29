@@ -213,39 +213,6 @@ class InsertionEngine:
             logger.error(error_msg, exc_info=True)
             return InsertionResult.error_result(source, error_msg)
 
-    def preview_insertions(self, targets: list[InsertionTarget], source: str) -> dict[str, object]:
-        """Preview what insertions would be performed without executing them."""
-        try:
-            context = self._create_insertion_context(source)
-            plans, _failures = self._create_execution_plans(targets, context)
-
-            plans_by_strategy: dict[str, int] = {}
-            plan_details: list[dict[str, object]] = []
-
-            for plan in plans:
-                strategy_name = plan.strategy_name
-                plans_by_strategy[strategy_name] = plans_by_strategy.get(strategy_name, 0) + 1
-
-                plan_details.append(
-                    {
-                        "strategy": strategy_name,
-                        "target": plan.target.name,
-                        "type": plan.target.type_annotation,
-                        "line": plan.target.location.line,
-                        "transformation": plan.transformation.value,
-                    }
-                )
-
-            return {
-                "total_plans": len(plans),
-                "plans_by_strategy": plans_by_strategy,
-                "plan_details": plan_details,
-            }
-
-        except Exception as e:
-            logger.error(f"Preview failed: {e}")
-            return {"error": str(e)}
-
 
 class AnnotationFinder(cst.CSTVisitor):
     """Visitor to find existing type annotations in source code, keyed by (name, line)."""
