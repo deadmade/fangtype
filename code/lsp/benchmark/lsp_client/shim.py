@@ -12,9 +12,16 @@ reuse the real ``TypeInfo`` so ``.type_str`` reads are identical.
 from __future__ import annotations
 
 import ast
+import logging
+from typing import TYPE_CHECKING
 
 from fangtype.analysis.types import TypeInfo, TypeSource
 from fangtype.utils.position_encoding import ast_source_lines, byte_to_codepoint, codepoint_to_utf16
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+logger = logging.getLogger(__name__)
 
 
 class LspScope:
@@ -313,10 +320,10 @@ def resolve_hint_facts(
 
     Returns:
         ``(facts, dropped)``. ``facts`` is ``(name, type_str, line0)`` — deliberately the
-        same shape ``_preview_tuples`` returns, so a consumer cannot tell which channel
-        produced it. A parameter and a return both carry the ``def`` line, matching what
-        ``previewInserts`` reported for them, even when the return hint itself anchors on a
-        wrapped signature's closing-paren line (see the ``is_return`` branch below).
+        same shape the retired ``previewInserts`` scrape returned, so a consumer cannot tell
+        which channel produced it. A parameter and a return both carry the ``def`` line,
+        matching what ``previewInserts`` reported for them, even when the return hint itself
+        anchors on a wrapped signature's closing-paren line (see the ``is_return`` branch).
         ``dropped`` counts the hints that matched no store position, which is every
         usage-site hint (those sit at a Load position).
     """
@@ -368,16 +375,21 @@ def build_scope_tree(
     hints: list[tuple[int, int, str, bool]],
     preview: list[tuple[str, str, int]],
 ) -> LspScopeTree:
-    """Assemble the facade from scraped inlay hints + previewInserts entries.
+    """Assemble the facade from scraped inlay hints + the name-keyed facts resolved from them.
 
     Args:
         source: the (already-open) document text.
         hints: scraped inlay hints as ``(line0, char, type_str, is_return)``.
-        preview: previewInserts entries as ``(name, type_str, line0)``.
+        preview: name-keyed facts as ``(name, type_str, line0)``, as ``resolve_hint_facts``
+            returns them. The parameter keeps its name from when ``previewInserts`` produced
+            them, and the shape is identical, which is why this function did not move when
+            the producer did.
 
-    previewInserts is the primary source for variables/attributes/returns
-    (name-keyed, unambiguous); inlay hints supply parameter types (position-matched
-    to ``def`` param positions) and a return-type fallback.
+    The name-keyed facts are the source for variables/attributes/returns (unambiguous once
+    a name is attached); the raw hints supply parameter types (position-matched to ``def``
+    param positions) and a return-type fallback. Both halves now come from the same
+    ``textDocument/inlayHint`` answer, so the two loops below agree by construction where
+    they used to be two channels that could disagree.
     """
     (
         def_lines,
@@ -409,7 +421,7 @@ def build_scope_tree(
             qname, param = param_pos[(line0, char)]
             scope_for(qname).parameters[param] = _ti(type_str, line0)
 
-    # Variables / attributes / returns from previewInserts (name-keyed).
+    # Variables / attributes / returns from the name-keyed facts.
     for name, type_str, line0 in preview:
         info = _ti(type_str, line0)
         if line0 in def_lines and def_lines[line0].rsplit(".", 1)[-1] == name:
@@ -440,8 +452,8 @@ def resolve_inferred_type(
 ) -> str | None:
     """Read a manifest target's inferred type from the LSP scope tree.
 
-    Reads types straight off the facade (``previewInserts``/inlay hints): there are
-    no engine recovery fallbacks (``infer_expression_type`` / ``recover_*`` /
+    Reads types straight off the facade, which now carries only what the inlay hints said.
+    There are no engine recovery fallbacks (``infer_expression_type`` / ``recover_*`` /
     ``widen_optional``), so this returns ``None`` where the direct engine would have
     recovered a type. ``"Unknown"`` is treated as a miss.
     """
@@ -535,41 +547,53 @@ def _hint_tuples(hints_raw: list) -> list[tuple[int, int, str, bool]]:
     return out
 
 
-def _preview_tuples(preview_raw: object) -> list[tuple[str, str, int]]:
-    will = getattr(preview_raw, "will_insert", None)
-    if will is None and isinstance(preview_raw, dict):
-        will = preview_raw.get("will_insert")
-    out: list[tuple[str, str, int]] = []
-    for entry in will or []:
-        variable = (
-            entry.get("variable") if isinstance(entry, dict) else getattr(entry, "variable", None)
-        )
-        type_str = entry.get("type") if isinstance(entry, dict) else getattr(entry, "type", None)
-        line = entry.get("line") if isinstance(entry, dict) else getattr(entry, "line", None)
-        if variable is not None and type_str is not None and line is not None:
-            out.append((variable, type_str, line - 1))  # server line is 1-based
-    return out
-
-
 async def collect_document(
-    client, uri: str, source: str, did_open: bool = False
+    client,
+    uri: str,
+    source: str,
+    did_open: bool = False,
+    on_dropped: Callable[[int], None] | None = None,
 ) -> tuple[list, list]:
-    """Gather inlay hints + previewInserts for a document.
+    """Gather inlay hints for a document and resolve them into name-keyed facts.
+
+    One request goes out, ``textDocument/inlayHint``, and both halves of the return are
+    derived from its answer. The harness used to ask ``fangtype/previewInserts`` for the
+    second half, a custom request the shipped extension never sends and this harness was
+    the only caller of, so the benchmark scored a channel no developer is ever served by.
+    ``resolve_hint_facts`` inverts each hint's anchor back to the binding it annotates and
+    produces the same ``(name, type_str, line0)`` shape, which is why the runners that
+    unpack this tuple did not have to move.
 
     When ``did_open`` is False (inference mode, where the on-disk file already holds
     the exact source) the server reads the file from disk — we skip ``didOpen`` to
     avoid the per-open diagnostics scheduling that congests the server over a long
     run. When True (e.g. stripped mypy source) we sync the text via ``didOpen``.
+
+    ``resolve_hint_facts`` also reports how many hints matched no binding, which is every
+    usage-site hint plus anything whose anchor the inverse mapping cannot place. That count
+    cannot ride along in the return, because four runners plus the bridge's cache depend on
+    the two-element shape, and it must not simply vanish either — a drop that nobody counts
+    is a moved evaluation number with no cause attached to it. It therefore leaves by two
+    other routes, namely a DEBUG log line per document for locality when one file looks
+    wrong, and ``on_dropped``, which ``ClientBridge`` uses to accumulate a run-wide total a
+    runner can read once at the end. ``on_dropped`` is called for every document, including
+    the ones that drop nothing, so the total is a sum over the whole run rather than over
+    the subset that happened to lose something.
     """
     if did_open:
         await client.open_document(uri, source)
     try:
         hints_raw = await client.inlay_hints(uri)
-        preview_raw = await client.preview_inserts(uri)
     finally:
         if did_open:
             await client.close_document(uri)
-    return _hint_tuples(hints_raw), _preview_tuples(preview_raw)
+    hints = _hint_tuples(hints_raw)
+    facts, dropped = resolve_hint_facts(source, hints)
+    if dropped:
+        logger.debug("%s: %d inlay hint(s) resolved to no binding", uri, dropped)
+    if on_dropped is not None:
+        on_dropped(dropped)
+    return hints, facts
 
 
 async def insert_all(client, uri: str) -> tuple[bool, str | None]:

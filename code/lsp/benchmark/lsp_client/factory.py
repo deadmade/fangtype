@@ -50,6 +50,12 @@ class ClientBridge:
             config_overrides=config_overrides,
         )
         self._cache: dict[tuple[str, str], tuple[list, list]] = {}
+        # Run-wide total of inlay hints that resolved to no binding, summed over every
+        # document this bridge collected. ``collect_document`` cannot return the count,
+        # because four runners unpack its two-element tuple, so it hands it here instead
+        # and a runner reads the total once at the end. A drop nobody counts is an
+        # evaluation number that moves with no cause attached to it.
+        self.dropped_hints = 0
         self.run_sync(self._client.start())
 
     def _run_loop(self) -> None:
@@ -65,13 +71,32 @@ class ClientBridge:
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
 
     def collect_sync(self, uri: str, source: str, did_open: bool = False) -> tuple[list, list]:
-        """Fetch (inlay hints, previewInserts) for a document, cached per (uri, source)."""
+        """Fetch (inlay hints, name-keyed facts) for a document, cached per (uri, source).
+
+        The cache is also what keeps ``dropped_hints`` honest. A repeated read of the same
+        ``(uri, source)`` never reaches the server, so it must not count its drops twice
+        either, and skipping the call skips the accumulation with it.
+        """
         key = (uri, source)
         if key not in self._cache:
             self._cache[key] = self.run_sync(
-                collect_document(self._client, uri, source, did_open=did_open)
+                collect_document(
+                    self._client,
+                    uri,
+                    source,
+                    did_open=did_open,
+                    on_dropped=self._record_dropped_hints,
+                )
             )
         return self._cache[key]
+
+    def _record_dropped_hints(self, dropped: int) -> None:
+        """Add one document's unresolvable-hint count to the run-wide total.
+
+        Called from the background loop thread, while ``run_sync`` holds the calling thread
+        on the future, so the two threads never touch the counter at the same moment.
+        """
+        self.dropped_hints += dropped
 
     def insert_sync(self, uri: str, source: str) -> tuple[bool, str | None, dict[str, int]]:
         """Insert all inferred types into ``source`` (opened as ``uri``), return
