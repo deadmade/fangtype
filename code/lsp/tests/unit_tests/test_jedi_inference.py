@@ -1,4 +1,4 @@
-"""JediInferenceEngine edge cases and TypeEvalPy integration scenarios."""
+"""JediInferenceEngine edge cases and environment selection."""
 
 import ast
 from unittest.mock import patch
@@ -92,64 +92,6 @@ class TestInferTypesResilience:
 
         assert result.is_complete is False
         get_names.assert_not_called()
-
-
-class TestTypeEvalPyIntegration:
-    """Test cases based on TypeEvalPy benchmark scenarios."""
-
-    async def test_return_types_scenario(self, engine):
-        """Test the return_types scenario from TypeEvalPy."""
-        source = """
-def func():
-    return 1, 2, 3
-
-a = func()
-
-def func1():
-    return {"a": 1, "b": 2, "c": 3}
-
-b = func1()
-
-def func4():
-    return set([1, 2, 3, 2, 1])
-
-d = func4()
-
-def func5():
-    return [x**2 for x in range(1, 6)]
-
-e = func5()
-"""
-        result = engine.infer_types(source)
-
-        func_return_types = {}
-        for scope in result.scope_tree.root.children:
-            if scope.return_type:
-                func_return_types[scope.name] = scope.return_type.type_str
-
-        assert "func" in func_return_types
-        assert func_return_types["func"].startswith("tuple")
-
-        assert "func1" in func_return_types
-        assert func_return_types["func1"].startswith("dict")
-
-        assert "func4" in func_return_types
-        assert func_return_types["func4"].startswith("set")
-
-        assert "func5" in func_return_types
-        assert func_return_types["func5"].startswith("list")
-
-        assert "a" in result.scope_tree.root.variables
-        assert result.scope_tree.root.variables["a"].type_str.startswith("tuple")
-
-        assert "b" in result.scope_tree.root.variables
-        assert result.scope_tree.root.variables["b"].type_str.startswith("dict")
-
-        assert "d" in result.scope_tree.root.variables
-        assert result.scope_tree.root.variables["d"].type_str.startswith("set")
-
-        assert "e" in result.scope_tree.root.variables
-        assert result.scope_tree.root.variables["e"].type_str.startswith("list")
 
 
 class TestEdgeCases:

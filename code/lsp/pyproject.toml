@@ -43,27 +43,15 @@ addopts = [
   "--strict-config",
   "--cov=fangtype",
   "--cov-report=term-missing",
-  "--cov-report=html",
 ]
-norecursedirs = [
-  ".direnv",
-  ".gitlab-ci-local",
-  "vscode-extension",
-  "benchmark",
-  "benchmark/data",
-]
+norecursedirs = [".direnv", "vscode-extension", "benchmark", "benchmark/data"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-exclude = [
-  "benchmark/data/",
-  "src/test/fixtures/",
-  "../../vscode-extension/src/test/fixtures/large-test-files/",
-  "**/../../vscode-extension/src/test/fixtures/large-test-files/*.py",
-]
+exclude = ["benchmark/data/"]
 
 [tool.ruff.lint]
 select = [
@@ -237,13 +225,6 @@ disallow_untyped_decorators = false
 # importable only at benchmark runtime after the data/TypeEvalPy submodule is checked out.
 [[tool.mypy.overrides]]
 module = ["result_analyzer", "result_analyzer.*", "jedi_type_inference"]
-ignore_missing_imports = true
-
-# thesis/evaluation/generate_tables.py: outside this package entirely, reached at test
-# runtime the same way (a sys.path insert plus a plain import), so mypy cannot follow it
-# statically and the whole module resolves to Any. See test_generate_tables_gate.py.
-[[tool.mypy.overrides]]
-module = ["generate_tables"]
 ignore_missing_imports = true
 
 [tool.isort]
