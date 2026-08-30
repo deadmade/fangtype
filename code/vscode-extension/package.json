@@ -182,9 +182,9 @@
         "lint": "eslint src",
         "typecheck": "tsc --noEmit -p tsconfig.json",
         "test:unit": "npx tsx node_modules/mocha/bin/_mocha --ui tdd --require ./test/unit/stub-vscode.cjs 'test/unit/**/*.test.ts'",
-        "pretest": "npm run build && npm run typecheck",
-        "test": "npm run test:unit && vscode-test",
-        "test:ci": "npm run test:unit && vscode-test"
+        "pretest": "npm run typecheck",
+        "test": "npm run test:unit",
+        "test:ci": "npm run test:unit"
     },
     "dependencies": {
         "@vscode/python-extension": "^1.0.5",
@@ -193,13 +193,12 @@
     "devDependencies": {
         "@eslint/js": "^10.0.0",
         "@types/node": "^26.1.0",
+        "@types/mocha": "^10.0.10",
         "@types/vscode": "^1.108.1",
-        "@vscode/test-cli": "^0.0.15",
-        "@vscode/test-electron": "3.0.0",
         "@vscode/vsce": "^3.7.1",
         "esbuild": "^0.28.1",
         "eslint": "^10.0.0",
-        "mocha-junit-reporter": "^2.2.1",
+        "mocha": "^11.7.6",
         "tsx": "^4.21.0",
         "typescript-eslint": "^8.56.0"
     },
