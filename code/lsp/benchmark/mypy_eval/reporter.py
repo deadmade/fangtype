@@ -270,6 +270,7 @@ def export_insertion_json(
     *,
     engine: str | None = None,
     gate_enabled: bool | None = None,
+    resolution_context: str | None = None,
     fangtype_revision: str | None = None,
     toolchain: dict[str, str | bool] | None = None,
 ) -> None:
@@ -288,6 +289,11 @@ def export_insertion_json(
         payload["engine"] = engine
     if gate_enabled is not None:
         payload["gate_enabled"] = gate_enabled
+    # Which tree the run resolved imports against, matching the restore export. Nothing
+    # else in the artefact records it, so without this an auditor cannot tell a run that
+    # resolved against corpus source from one that fell through to site-packages.
+    if resolution_context is not None:
+        payload["resolution_context"] = resolution_context
     if fangtype_revision is not None:
         payload["fangtype_revision"] = fangtype_revision
     if toolchain is not None:

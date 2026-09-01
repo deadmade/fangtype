@@ -399,6 +399,7 @@ def _run_mypy_insertion(args: argparse.Namespace, workspace: Path) -> int:
             args.output,
             engine=args.engine,
             gate_enabled=not args.no_mypy_gate,
+            resolution_context="cold" if args.cold_start else "annotated",
             fangtype_revision=args.fangtype_revision,
             toolchain=args.toolchain,
         )
