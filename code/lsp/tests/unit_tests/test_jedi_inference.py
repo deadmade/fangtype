@@ -1,6 +1,9 @@
 """JediInferenceEngine edge cases and environment selection."""
 
 import ast
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 import jedi
@@ -218,3 +221,38 @@ class TestJediEnvironmentSelection:
             env = engine._get_env()
         mk.assert_not_called()
         assert env is sentinel
+
+
+class TestConcurrentInference:
+    """Jedi's compiled subprocess, jedi.Project and parso's parse cache are shared and
+
+    unguarded, so the engine must serialize every Jedi call. Without the lock, concurrent
+    `asyncio.to_thread` inferences interleave on one pickle pipe and unpickle each other's
+    bytes (UnpicklingError: invalid load key).
+    """
+
+    def test_inference_never_runs_two_jedi_calls_at_once(self, engine):
+        source = "def f():\n    return 1\n\n\nx = f()\n"
+        live = 0
+        peak = 0
+        counter_lock = threading.Lock()
+        real = engine._build_scope_tree_result
+
+        def watched(*args, **kwargs):
+            nonlocal live, peak
+            with counter_lock:
+                live += 1
+                peak = max(peak, live)
+            try:
+                time.sleep(0.01)  # widen the window an unguarded engine would race in
+                return real(*args, **kwargs)
+            finally:
+                with counter_lock:
+                    live -= 1
+
+        with patch.object(engine, "_build_scope_tree_result", watched):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(lambda _: engine.infer_types(source), range(8)))
+
+        assert peak == 1, f"{peak} Jedi calls overlapped; the engine lock is not holding"
+        assert all(r.is_complete for r in results)

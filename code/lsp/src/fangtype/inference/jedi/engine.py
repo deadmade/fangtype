@@ -2,6 +2,7 @@
 
 import ast
 import logging
+import threading
 from typing import Any
 
 import jedi
@@ -26,6 +27,12 @@ class JediInferenceEngine:
         """Init; settings is the DI singleton read per call for cross_file_contracts_enabled."""
         self._settings = settings
         self._env: Any | None = None
+        # One Jedi Environment (and its compiled subprocess), one jedi.Project per root and
+        # parso's module-global parse cache are shared by every request, and none of them is
+        # thread safe -- jedi's CompiledSubprocess._send writes a request then reads the reply
+        # on one pipe with no lock, so concurrent to_thread inferences interleave and unpickle
+        # each other's bytes. Serialize every Jedi call instead.
+        self._jedi_lock = threading.Lock()
 
     def _get_env(self) -> Any:
         """Get or create the Jedi environment (cached)."""
@@ -104,24 +111,27 @@ class JediInferenceEngine:
             logger.debug("Source does not parse, no types to infer: %s", e)
             return self._create_empty_result(source)
 
-        try:
-            return self._build_scope_tree_result(
-                source, tree, path, project_root, enable_cross_file, cancel_token
-            )
-        except Exception as first:
-            # Jedi reads parso's module-global parse cache unguarded, so an evicted entry
-            # surfaces here as a KeyError from deep inside name resolution. Rebuilding the
-            # Script re-parses and repopulates that cache for the paths it touches, so one
-            # retry is self-healing rather than hopeful. Same shape as the retry-once in
-            # validation/mypy_runner.py.
-            logger.warning("Jedi inference failed for %s (%s); retrying once", path, first)
+        with self._jedi_lock:
             try:
                 return self._build_scope_tree_result(
                     source, tree, path, project_root, enable_cross_file, cancel_token
                 )
-            except Exception as second:
-                logger.error("Jedi inference failed again for %s: %s", path, second, exc_info=True)
-                return self._create_empty_result(source)
+            except Exception as first:
+                # Jedi reads parso's module-global parse cache unguarded, so an evicted entry
+                # surfaces here as a KeyError from deep inside name resolution. Rebuilding the
+                # Script re-parses and repopulates that cache for the paths it touches, so one
+                # retry is self-healing rather than hopeful. Same shape as the retry-once in
+                # validation/mypy_runner.py.
+                logger.warning("Jedi inference failed for %s (%s); retrying once", path, first)
+                try:
+                    return self._build_scope_tree_result(
+                        source, tree, path, project_root, enable_cross_file, cancel_token
+                    )
+                except Exception as second:
+                    logger.error(
+                        "Jedi inference failed again for %s: %s", path, second, exc_info=True
+                    )
+                    return self._create_empty_result(source)
 
     def _build_scope_tree_result(
         self,
@@ -157,30 +167,32 @@ class JediInferenceEngine:
         if not locations:
             return {}
 
-        try:
-            results: dict[tuple[int, int], str] = {}
-            script = self._build_script(source, path, None)
+        with self._jedi_lock:
+            try:
+                results: dict[tuple[int, int], str] = {}
+                script = self._build_script(source, path, None)
 
-            for line, col in locations:
-                if cancel_token.cancelled():
-                    break
-                try:
-                    inferences = script.infer(line, col)
-                except ValueError:
-                    logger.debug(
-                        "Skipping invalid location for inference: line=%s col=%s", line, col
-                    )
-                    continue
-                except Exception as e:
-                    # Jedi/parso may raise deep internally; drop only this location, keep the rest.
-                    logger.warning("Jedi inference failed at line=%s col=%s: %s", line, col, e)
-                    continue
-                if inferences:
-                    type_str = format_types(list(inferences))
-                    if type_str and type_str != "Unknown":
-                        results[(line, col)] = type_str
+                for line, col in locations:
+                    if cancel_token.cancelled():
+                        break
+                    try:
+                        inferences = script.infer(line, col)
+                    except ValueError:
+                        logger.debug(
+                            "Skipping invalid location for inference: line=%s col=%s", line, col
+                        )
+                        continue
+                    except Exception as e:
+                        # Jedi/parso may raise deep internally; drop only this location, keep
+                        # the rest.
+                        logger.warning("Jedi inference failed at line=%s col=%s: %s", line, col, e)
+                        continue
+                    if inferences:
+                        type_str = format_types(list(inferences))
+                        if type_str and type_str != "Unknown":
+                            results[(line, col)] = type_str
 
-            return results
-        except Exception as e:
-            logger.error(f"Error in infer_types_at_locations: {e}", exc_info=True)
-            return {}
+                return results
+            except Exception as e:
+                logger.error(f"Error in infer_types_at_locations: {e}", exc_info=True)
+                return {}
