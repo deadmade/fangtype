@@ -5,9 +5,13 @@ from __future__ import annotations
 import ast
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from fangtype.analysis.ast_traversal import extract_loop_variables, iter_qualified_function_nodes
 from fangtype.insertion.types import CodeLocation, InsertionTarget, TargetType
+
+if TYPE_CHECKING:
+    from fangtype.analysis.types import ImportHint
 
 
 @dataclass(frozen=True)
@@ -16,6 +20,10 @@ class AssignmentTarget:
 
     line_1_based: int
     target_type: TargetType
+    # Line of the innermost enclosing def/class, 0 for module scope. Candidates are indexed by
+    # bare name across the whole file, so this is what keeps "prefer an earlier binding" from
+    # reaching into another function that reuses the name.
+    scope_key: int = 0
 
 
 @dataclass(frozen=True)
@@ -124,12 +132,45 @@ def _augassign_candidate_type_for_target(target: ast.AST, var_name: str) -> Targ
     return None
 
 
+def _build_scope_spans(tree: ast.Module) -> list[tuple[int, int, int]]:
+    """(start, end, key) line spans for every def/class in the module, key being the start line.
+
+    Module scope is the absence of a containing span rather than an entry, so it needs no key
+    of its own beyond the 0 that ``_scope_key_for_line`` falls back to.
+    """
+    spans: list[tuple[int, int, int]] = []
+    for node in ast.walk(tree):
+        # Tuple form, not `A | B | C`: the three-way UnionType expression leaks Any under
+        # disallow_any_expr, while the two-way one used elsewhere in the codebase does not.
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            end = node.end_lineno if node.end_lineno is not None else node.lineno
+            spans.append((node.lineno, end, node.lineno))
+    return spans
+
+
+def _scope_key_for_line(spans: list[tuple[int, int, int]], line_1_based: int) -> int:
+    """Key of the innermost span containing the line, 0 when the line is at module scope.
+
+    Innermost is the latest-starting containing span, since a nested def always opens after
+    the one enclosing it.
+    """
+    key = 0
+    best_start = 0
+    for start, end, span_key in spans:
+        if start <= line_1_based <= end and start >= best_start:
+            best_start = start
+            key = span_key
+    return key
+
+
 def build_source_index(source: str) -> SourceIndex | None:
     """Build a reusable source index for assignment and function lookups."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return None
+
+    scope_spans = _build_scope_spans(tree)
 
     assignment_candidates_by_name: dict[str, list[AssignmentTarget]] = {}
     for node in ast.walk(tree):
@@ -144,7 +185,11 @@ def build_source_index(source: str) -> SourceIndex | None:
                     if is_chained and target_type == TargetType.VARIABLE_SIMPLE:
                         target_type = TargetType.VARIABLE_COMPLEX
                     assignment_candidates_by_name.setdefault(identifier, []).append(
-                        AssignmentTarget(line_1_based=node.lineno, target_type=target_type)
+                        AssignmentTarget(
+                            line_1_based=node.lineno,
+                            target_type=target_type,
+                            scope_key=_scope_key_for_line(scope_spans, node.lineno),
+                        )
                     )
         elif isinstance(node, ast.AugAssign):
             for identifier in _target_identifiers(node.target):
@@ -152,7 +197,11 @@ def build_source_index(source: str) -> SourceIndex | None:
                 if target_type is None:
                     continue
                 assignment_candidates_by_name.setdefault(identifier, []).append(
-                    AssignmentTarget(line_1_based=node.lineno, target_type=target_type)
+                    AssignmentTarget(
+                        line_1_based=node.lineno,
+                        target_type=target_type,
+                        scope_key=_scope_key_for_line(scope_spans, node.lineno),
+                    )
                 )
         elif isinstance(node, ast.NamedExpr):
             for identifier in _target_identifiers(node.target):
@@ -161,6 +210,7 @@ def build_source_index(source: str) -> SourceIndex | None:
                         line_1_based=node.lineno,
                         # Walrus targets need pre-declaration; no in-place rewrite available.
                         target_type=TargetType.VARIABLE_COMPLEX,
+                        scope_key=_scope_key_for_line(scope_spans, node.lineno),
                     )
                 )
         elif isinstance(node, ast.For | ast.AsyncFor):
@@ -169,6 +219,7 @@ def build_source_index(source: str) -> SourceIndex | None:
                     AssignmentTarget(
                         line_1_based=node.lineno,
                         target_type=TargetType.ITERATION_VARIABLE,
+                        scope_key=_scope_key_for_line(scope_spans, node.lineno),
                     )
                 )
         # Comprehension/genexp loop targets are deliberately not registered (never annotatable).
@@ -187,26 +238,68 @@ def build_source_index(source: str) -> SourceIndex | None:
     )
 
 
+# Target types with no in-place rewrite: PEP 526 cannot annotate the binding itself, so the
+# engine writes a standalone `x: T` declaration above the statement instead.
+_DECLARATION_FORCING = frozenset({TargetType.VARIABLE_COMPLEX, TargetType.ITERATION_VARIABLE})
+
+# Target types the engine can annotate where the binding already stands.
+_INPLACE_ANNOTATABLE = frozenset(
+    {TargetType.VARIABLE_SIMPLE, TargetType.SUBSCRIPT_ACCESS, TargetType.ATTRIBUTE_ACCESS}
+)
+
+
+def _candidate_line(candidate: AssignmentTarget) -> int:
+    return candidate.line_1_based
+
+
+def _prefer_earlier_binding(
+    candidates: list[AssignmentTarget], selected: AssignmentTarget
+) -> AssignmentTarget:
+    """Redirect a declaration away from the newest binding of a name to an earlier one.
+
+    A declaration written above the newest binding lands after every earlier binding of the
+    same name, which mypy reports as `no-redef` — the accumulator idiom `total = 0` followed by
+    `total += n` puts the declaration inside the loop. Annotating the earliest in-place binding
+    instead both avoids the redefinition and states the type where the value first arrives.
+
+    Restricted to the selected binding's own scope, because candidates are indexed by bare name
+    across the whole file and an earlier `total` may belong to a different function.
+    """
+    if selected.target_type not in _DECLARATION_FORCING:
+        return selected
+
+    in_scope = [
+        candidate
+        for candidate in candidates
+        if candidate.scope_key == selected.scope_key
+        and candidate.line_1_based <= selected.line_1_based
+    ]
+    inplace = [c for c in in_scope if c.target_type in _INPLACE_ANNOTATABLE]
+    if inplace:
+        return min(inplace, key=_candidate_line)
+
+    # No binding this can be written onto, so the declaration stands — but above the first
+    # binding in the scope, which no earlier one then precedes.
+    return min(in_scope, key=_candidate_line) if in_scope else selected
+
+
 def _select_assignment_target(
     candidates: list[AssignmentTarget], line_hint_0: int | None
 ) -> AssignmentTarget:
     """Select the best assignment candidate for an optional hint line."""
     if line_hint_0 is None:
-        return candidates[0]
+        return _prefer_earlier_binding(candidates, candidates[0])
 
     hint_1 = line_hint_0 + 1
-
-    def candidate_line(candidate: AssignmentTarget) -> int:
-        return candidate.line_1_based
 
     def distance_to_hint(candidate: AssignmentTarget) -> int:
         return abs(candidate.line_1_based - hint_1)
 
     at_or_before = [candidate for candidate in candidates if candidate.line_1_based <= hint_1]
     if at_or_before:
-        return max(at_or_before, key=candidate_line)
+        return _prefer_earlier_binding(candidates, max(at_or_before, key=_candidate_line))
 
-    return min(candidates, key=distance_to_hint)
+    return _prefer_earlier_binding(candidates, min(candidates, key=distance_to_hint))
 
 
 def find_assignment_target_indexed(
@@ -274,6 +367,7 @@ def create_variable_target(
     type_annotation: str,
     line: int,
     target_type: TargetType = TargetType.VARIABLE_SIMPLE,
+    import_hint: ImportHint | None = None,
 ) -> InsertionTarget:
     """Create an insertion target for a variable annotation."""
     return InsertionTarget(
@@ -281,4 +375,5 @@ def create_variable_target(
         location=CodeLocation(line=line, column=0),
         type_annotation=type_annotation,
         name=name,
+        import_hint=import_hint,
     )

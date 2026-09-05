@@ -148,6 +148,22 @@ export async function resolveInterpreter(settings: ISettings): Promise<string[]>
 }
 
 /**
+ * Whether an install mode has to probe the launch interpreter for the server's dependencies.
+ *
+ * Only `managed` may skip it, because it just installed them into a venv it built. `useBundled`
+ * ships none of them: nox vendors the pure-Python fangtype package alone, with `--no-deps`, and
+ * that is exactly what keeps the VSIX universal across OS and CPython minor version. So libcst
+ * and mypy are resolved from the user's interpreter under `useBundled` just as they are under
+ * `fromEnvironment`, and a missing one has to be reported rather than discovered at first use.
+ *
+ * @param installMode - The resolved `fangtype.installMode` setting.
+ * @returns True when the deps probe must run before launch.
+ */
+export function needsDepsProbe(installMode: string): boolean {
+    return installMode !== 'managed';
+}
+
+/**
  * Create (but do not start) a client launching the server from source under the resolved
  * interpreter; shows an error and returns `undefined` so the caller aborts without retrying.
  *
@@ -161,7 +177,6 @@ export async function createServer(
     globalStoragePath: string
 ): Promise<LanguageClient | undefined> {
     const managed = settings.installMode === 'managed';
-    const fromEnv = settings.installMode === 'fromEnvironment';
 
     // Base interpreter: Jedi/mypy infer against it, managed venv builds from it, others launch it.
     const baseInterpreter = await resolveInterpreter(settings);
@@ -201,8 +216,7 @@ export async function createServer(
         return undefined;
     }
 
-    // Only fromEnvironment needs a deps probe; managed just installed them, useBundled ships them.
-    if (fromEnv) {
+    if (needsDepsProbe(settings.installMode)) {
         const deps = await checkServerDeps(resolved.interpreter, invocation.env);
         if (!deps.ok) {
             traceError(

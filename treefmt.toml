@@ -2,7 +2,7 @@
 command = "ruff"
 options = ["format"]
 includes = ["*.py"]
-excludes = ["tests/benchmarks/data/", "**/__pycache__/", "*.pyc"]
+excludes = ["code/lsp/benchmark/data/", "**/__pycache__/", "*.pyc"]
 
 [formatter.prettier]
 command = "prettier"
@@ -11,7 +11,6 @@ includes = ["*.json", "*.yaml", "*.yml", "*.js", "*.ts"]
 excludes = [
   "code/vscode-extension/node_modules/",
   "code/vscode-extension/dist/",
-  "code/vscode-extension/out/",
   "flake.lock",
 ]
 

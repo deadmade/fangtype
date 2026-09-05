@@ -2,7 +2,8 @@ import { window, workspace } from 'vscode';
 import type { TextEditor } from 'vscode';
 import { LanguageClient } from 'vscode-languageclient/node';
 import type { FangtypeResult, PreviewResult, PreviewItem } from '../types';
-import { lspWorkspaceEditToVscode } from '../lsp/editUtils';
+import { canApplyWholeFileReplace, lspWorkspaceEditToVscode } from '../lsp/editUtils';
+import { sendRequestWithTimeout } from '../lsp/requestTimeout';
 
 export async function removeTypeAtCursor(
     editor: TextEditor,
@@ -22,11 +23,14 @@ export async function removeTypeAtCursor(
 
         const variableName = document.getText(wordRange);
 
-        // Cheap annotation check: does the line contain both ':' and '='?
+        // Cheap annotation check: does the line carry a ':' at all? Requiring '=' too would
+        // refuse a standalone `total: int`, which is exactly the shape the insert path writes
+        // for a binding PEP 526 cannot annotate in place. The server decides what is actually
+        // removable and reports what it skipped.
         const line = document.lineAt(wordRange.start.line);
         const lineText = line.text;
 
-        if (!lineText.includes(':') || !lineText.includes('=')) {
+        if (!lineText.includes(':')) {
             window.showWarningMessage(
                 `Variable '${variableName}' has no type annotation to remove`
             );
@@ -34,20 +38,22 @@ export async function removeTypeAtCursor(
         }
 
         // Scope the removal to the cursor's line; a bare name would match every scope in the file.
-        const result = await client.sendRequest<FangtypeResult>('fangtype/removeTypesInFile', [
-            uri,
-            [variableName],
-            false,
-            wordRange.start.line,
-        ]);
+        const result = await sendRequestWithTimeout<FangtypeResult>(
+            client,
+            'fangtype/removeTypesInFile',
+            [uri, [variableName], true, wordRange.start.line],
+            'Remove type annotation'
+        );
 
         if (result.success && result.edits) {
             const { edit: vscodeEdit, versions } = lspWorkspaceEditToVscode(result.edits);
 
             const expectedVersion = versions.get(uri);
-            if (expectedVersion != null && document.version !== expectedVersion) {
+            if (!canApplyWholeFileReplace(expectedVersion, document.version)) {
                 window.showWarningMessage(
-                    'Document changed since the removal was computed — please retry.'
+                    expectedVersion === null
+                        ? 'Cannot apply a whole-file replace without a document version — please retry.'
+                        : 'Document changed since the removal was computed — please retry.'
                 );
                 return;
             }
@@ -80,10 +86,12 @@ export async function removeAllTypesInFile(client: LanguageClient): Promise<void
         const uri = editor.document.uri.toString();
 
         // Get preview first
-        const preview = await client.sendRequest<PreviewResult>('fangtype/previewRemovals', [
-            uri,
-            null,
-        ]);
+        const preview = await sendRequestWithTimeout<PreviewResult>(
+            client,
+            'fangtype/previewRemovals',
+            [uri, null, true],
+            'Preview type removal'
+        );
 
         if (!preview.success || preview.total_changes === 0) {
             window.showInformationMessage(
@@ -121,19 +129,22 @@ export async function removeAllTypesInFile(client: LanguageClient): Promise<void
         }
 
         // Send request to remove all types
-        const result = await client.sendRequest<FangtypeResult>('fangtype/removeTypesInFile', [
-            uri,
-            null,
-            false,
-        ]);
+        const result = await sendRequestWithTimeout<FangtypeResult>(
+            client,
+            'fangtype/removeTypesInFile',
+            [uri, null, true],
+            'Remove all type annotations'
+        );
 
         if (result.success && result.edits) {
             const { edit: vscodeEdit, versions } = lspWorkspaceEditToVscode(result.edits);
 
             const expectedVersion = versions.get(uri);
-            if (expectedVersion != null && editor.document.version !== expectedVersion) {
+            if (!canApplyWholeFileReplace(expectedVersion, editor.document.version)) {
                 window.showWarningMessage(
-                    'Document changed since the removal was computed — please retry.'
+                    expectedVersion === null
+                        ? 'Cannot apply a whole-file replace without a document version — please retry.'
+                        : 'Document changed since the removal was computed — please retry.'
                 );
                 return;
             }

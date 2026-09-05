@@ -38,7 +38,6 @@ from fangtype.protocols import (
     DiagnosticEngineProtocol,
     TypeValidatorProtocol,
 )
-from fangtype.validation.mypy_validator import TypeValidationResult  # noqa: TC001
 from fangtype.workflow import TypeAnnotationWorkflow
 
 _LOG_LEVEL = getattr(
@@ -70,14 +69,11 @@ def _build_declaration_hints(
     helper: InlayHintHelper,
     inference_result: InferenceResult,
     source: str,
-    validation_results: dict[str, TypeValidationResult] | None,
 ) -> list[types.InlayHint]:
-    """Declaration-site inlay hints from the pre-validated types, across all scopes."""
+    """Declaration-site inlay hints for every inferred type, across all scopes."""
     hints: list[types.InlayHint] = []
-    for scope_id, scope_obj in inference_result.scope_tree.scopes_by_id.items():
-        hints.extend(
-            helper.generate_hints_for_scope(scope_obj, source, validation_results, scope_id)
-        )
+    for scope_obj in inference_result.scope_tree.scopes_by_id.values():
+        hints.extend(helper.generate_hints_for_scope(scope_obj, source))
     return hints
 
 
@@ -130,7 +126,6 @@ class FangtypeServer(LanguageServer):
         self._register(types.TEXT_DOCUMENT_DID_CLOSE, self.did_close)
         self._register("fangtype/insertType", self.insert_type)
         self._register("fangtype/insertTypesInFile", self.insert_types_in_file)
-        self._register("fangtype/previewInserts", self.preview_inserts)
         self._register("fangtype/removeTypesInFile", self.remove_types_in_file)
         self._register("fangtype/previewRemovals", self.preview_removals)
         self._register(types.TEXT_DOCUMENT_CODE_ACTION, self.code_actions)
@@ -224,8 +219,8 @@ class FangtypeServer(LanguageServer):
             inlay_hint_helper = self.inlay_hints_helper
 
             try:
-                # 1. Infer + validate all types (off-thread, in the workflow).
-                inference_result, validation_results = await workflow.collect_and_validate_types(
+                # 1. Infer all types (off-thread, in the workflow).
+                inference_result = await workflow.collect_types(
                     source,
                     file_path,
                     cancel_token=cancel_token,
@@ -234,7 +229,7 @@ class FangtypeServer(LanguageServer):
                 )
                 # 2. Declaration-site hints (LSP InlayHint objects built here, server-side).
                 hints: list[types.InlayHint] = _build_declaration_hints(
-                    inlay_hint_helper, inference_result, source, validation_results
+                    inlay_hint_helper, inference_result, source
                 )
                 # 3. Usage-site hints across the requested range.
                 hints.extend(
@@ -278,6 +273,10 @@ class FangtypeServer(LanguageServer):
         # Drop superseded inference (memory hygiene; bumped version already makes it unreachable).
         self.document_cache.evict(uri)
         self.diagnostics.schedule_diagnostics(self, uri)
+        # Refresh inlay hints now, not only after the debounced diagnostics: an applied insert edit
+        # produces exactly this change, and VSCode's own re-pull can get cancelled and stick. Cheap
+        # — the client middleware dedupes it onto the in-flight re-pull for this same version.
+        await self._request_inlay_refresh()
 
     async def did_save(self, params: types.DidSaveTextDocumentParams) -> None:
         """Handle document save event and run diagnostics."""
@@ -433,55 +432,6 @@ class FangtypeServer(LanguageServer):
                 "inserted_count": 0,
             }
 
-    async def preview_inserts(self, ls: LanguageServer, params: list[Any]) -> dict[str, Any]:
-        """Preview insertions (params [uri]); returns {success, will_insert, total_changes}."""
-        # Cancel token built before try so it's in scope in the except; a cancel stops the worker.
-        cancel_token = CancellationToken()
-
-        try:
-            doc_context, _ = extract_uri_and_context(ls, params)
-            uri = doc_context.uri
-            logger.info(f"Preview inserts request for {uri}")
-
-            source: str = doc_context.source
-            file_path: str = doc_context.file_path
-
-            # Use workflow for preview (async)
-            workflow = self.workflow
-            preview: dict[str, Any] = await workflow.preview_insertions(
-                source,
-                file_path,
-                cancel_token=cancel_token,
-                uri=doc_context.uri,
-                version=doc_context.version,
-            )
-
-            logger.info(f"Preview: {preview['total_changes']} insertions")
-
-            return {
-                "success": True,
-                "will_insert": preview["will_insert"],
-                "total_changes": preview["total_changes"],
-            }
-
-        except asyncio.CancelledError:
-            cancel_token.cancel()
-            logger.info("Preview inserts cancelled by client")
-            return {
-                "success": False,
-                "will_insert": [],
-                "total_changes": 0,
-                "message": "Preview cancelled by user",
-            }
-        except Exception as e:
-            logger.error(f"Error in preview_inserts: {e}", exc_info=True)
-            return {
-                "success": False,
-                "will_insert": [],
-                "total_changes": 0,
-                "message": f"Internal error: {e!s}",
-            }
-
     async def remove_types_in_file(self, ls: LanguageServer, params: Any) -> dict[str, Any]:
         """Remove annotations (params [uri, vars|None=all, include_functions, line?]); -> dict."""
         try:
@@ -554,22 +504,30 @@ class FangtypeServer(LanguageServer):
             }
 
     def preview_removals(self, ls: LanguageServer, params: Any) -> dict[str, Any]:
-        """Preview removals (sync; params [uri, vars|None=all]); returns a summary dict."""
+        """Preview removals (sync; params [uri, vars|None=all, include_functions]); summary dict."""
         try:
-            doc_context, optional_params = extract_uri_and_context(ls, params, num_optional=1)
+            doc_context, optional_params = extract_uri_and_context(ls, params, num_optional=2)
             uri = doc_context.uri
-            # Optional arg at this untyped LSP request boundary: the variable-name list.
+            # Optional args at this untyped LSP boundary: [variable names, include_functions].
             variables: list[str] | None = (
                 cast("list[str]", optional_params[0]) if optional_params[0] is not None else None
             )
+            include_functions: bool = (
+                bool(optional_params[1]) if optional_params[1] is not None else False
+            )
 
-            logger.info(f"Preview removals request for {uri} (variables={variables})")
+            logger.info(
+                f"Preview removals request for {uri} "
+                f"(variables={variables}, include_functions={include_functions})"
+            )
 
             source: str = doc_context.source
 
             # Get preview (sync - fast CPU-bound operation) via the workflow.
             workflow = self.workflow
-            preview: dict[str, Any] = workflow.preview_removals(source, variables)
+            preview: dict[str, Any] = workflow.preview_removals(
+                source, variables, include_functions
+            )
 
             logger.info(
                 f"Preview: {preview['total_changes']} removals, "
@@ -594,7 +552,16 @@ class FangtypeServer(LanguageServer):
 
     async def code_actions(self, params: types.CodeActionParams) -> list[types.CodeAction]:
         """Lightbulb: annotate unannotated variables."""
-        return await self.code_action_helper.get_insert_type_actions(self, params)
+        # Per-request cancel token; a cancel sets its flag to stop the inference worker.
+        cancel_token = CancellationToken()
+        try:
+            return await self.code_action_helper.get_insert_type_actions(
+                self, params, cancel_token=cancel_token
+            )
+        except asyncio.CancelledError:
+            cancel_token.cancel()
+            logger.info("Code action inference cancelled by client")
+            return []
 
     def on_shutdown(self, *_: object) -> None:
         """Release validator resources on shutdown; guarded so a failure never blocks it."""

@@ -36,6 +36,21 @@ for (const name of [
     stub[name] = class {};
 }
 
+// requestTimeout.ts (S6.4) actually calls cancel()/dispose() and reads token.isCancellationRequested,
+// so this one needs real behaviour rather than an inert `class {}`.
+stub.CancellationTokenSource = class {
+    constructor() {
+        this.token = {
+            isCancellationRequested: false,
+            onCancellationRequested: () => ({ dispose() {} }),
+        };
+    }
+    cancel() {
+        this.token.isCancellationRequested = true;
+    }
+    dispose() {}
+};
+
 const stubModule = new Module('vscode');
 stubModule.exports = stub;
 stubModule.loaded = true;

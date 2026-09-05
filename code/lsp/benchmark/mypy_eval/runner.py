@@ -5,6 +5,13 @@ in memory, while ``path``/``project_root`` point at the original mypy tree — s
 cross-module imports resolve against the still-annotated project, and only the
 file under test is untyped. Insertions accumulate in memory per file and are
 never written back to disk.
+
+``cold_start`` moves ``path``/``project_root`` to the prepared ``coldstart/`` tree,
+where every file is stripped. The document under test is byte-identical between the
+two arms, because both read their text from ``stripped/``; what changes is the tree a
+cross-module name resolves against. That makes the pair a matched comparison over one
+variable, and it is the setting a developer adopting the tool on an unannotated project
+is actually in.
 """
 
 import json
@@ -12,8 +19,7 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
 
-from benchmark.lsp_client.factory import ClientBridge
-from benchmark.lsp_client.pool import map_over_bridges
+from benchmark.lsp_client.factory import ClientBridge, map_over_bridge
 from benchmark.lsp_client.shim import (
     build_scope_tree,
     is_valid_annotation,
@@ -96,6 +102,10 @@ class MypyBenchmarkResults:
     mypy_revision: str
     workspace: str
     manifest_path: str
+    # Files in the prepared workspace and in the whole checkout before that
+    # restriction, carried straight from MypyPreparationResult.
+    total_python_files: int
+    checkout_total_python_files: int
     typed_files: MypyGroupSummary
     untyped_files: MypyGroupSummary
     file_results: list[MypyFileResult]
@@ -224,8 +234,10 @@ def _load_preparation_result(workspace: Path) -> MypyPreparationResult:
         workspace=payload["workspace"],
         original_dir=payload["original_dir"],
         stripped_dir=payload["stripped_dir"],
+        coldstart_dir=payload["coldstart_dir"],
         manifest_path=payload["manifest_path"],
         total_python_files=payload["total_python_files"],
+        checkout_total_python_files=payload["checkout_total_python_files"],
         typed_file_count=payload["typed_file_count"],
         untyped_file_count=payload["untyped_file_count"],
         error_file_count=payload["error_file_count"],
@@ -311,7 +323,7 @@ def _evaluate_file(
     bridge: ClientBridge,
     file_manifest: MypyFileManifest,
     stripped_dir: Path,
-    mypy_dir: Path,
+    uri_base: Path,
 ) -> tuple[MypyFileResult, list[MypyTargetResult]]:
     """Restore every target in one eligible file via inference; classify each.
 
@@ -320,9 +332,9 @@ def _evaluate_file(
     """
     try:
         current_source = (stripped_dir / file_manifest.relative_path).read_text(encoding="utf-8")
-        uri = (mypy_dir / file_manifest.relative_path).as_uri()
-        hints, preview = bridge.collect_sync(uri, current_source, did_open=True)
-        tree = build_scope_tree(current_source, hints, preview)
+        uri = (uri_base / file_manifest.relative_path).as_uri()
+        hints, name_facts = bridge.collect_sync(uri, current_source, did_open=True)
+        tree = build_scope_tree(current_source, hints, name_facts)
 
         # Per-target classification stays inside the guard: a rare resolve/validate failure records
         # this one file as RUN_ERROR (keeping its targets in the denominator) instead of aborting
@@ -387,12 +399,20 @@ def run_mypy_benchmark(
     workspace: Path,
     journal_path: Path | None = None,
     engine: str = "jedi",
-    workers: int = 1,
+    cold_start: bool = False,
 ) -> MypyBenchmarkResults:
     """Run the mypy restoration benchmark from a prepared workspace."""
     preparation = _load_preparation_result(workspace)
     mypy_dir = Path(preparation.mypy_dir).resolve()
     stripped_dir = Path(preparation.stripped_dir)
+    # Where the document under test claims to live, and the import root handed to Jedi.
+    # The annotated arm names the real checkout, whose root is the package's parent; the
+    # cold arm names the prepared tree, whose root is likewise the package's parent. Both
+    # are passed explicitly rather than left to Jedi's walk-up, which would otherwise find
+    # code/lsp's pyproject.toml above the prepared workspace and resolve the corpus
+    # package through site-packages.
+    uri_base = Path(preparation.coldstart_dir) if cold_start else mypy_dir
+    project_root = str(uri_base.parent)
 
     journaled = _load_journal(journal_path) if journal_path is not None else {}
     if journaled:
@@ -430,7 +450,7 @@ def run_mypy_benchmark(
     def evaluate(
         bridge: ClientBridge, file_manifest: MypyFileManifest, _index: int
     ) -> tuple[MypyFileResult, list[MypyTargetResult]]:
-        return _evaluate_file(bridge, file_manifest, stripped_dir, mypy_dir)
+        return _evaluate_file(bridge, file_manifest, stripped_dir, uri_base)
 
     def report(
         _index: int,
@@ -457,15 +477,18 @@ def run_mypy_benchmark(
         if journal_path is not None:
             _append_journal(journal_path, file_result, file_target_results)
 
-    map_over_bridges(
+    map_over_bridge(
         pending,
-        make_bridge=lambda: ClientBridge(engine=engine, timeout=_LSP_REQUEST_TIMEOUT),
-        workers=workers,
+        make_bridge=lambda: ClientBridge(
+            engine=engine, timeout=_LSP_REQUEST_TIMEOUT, project_root=project_root
+        ),
         fn=evaluate,
         on_done=report,
     )
 
-    # Reassemble in original manifest order for deterministic, worker-count-independent output.
+    # Reassemble in original manifest order. Resume replays completed files from the
+    # journal ahead of the pending ones, so the two lists have to be merged back rather
+    # than concatenated.
     file_results: list[MypyFileResult] = []
     target_results: list[MypyTargetResult] = []
     for file_manifest in preparation.files:
@@ -484,6 +507,8 @@ def run_mypy_benchmark(
         mypy_revision=preparation.mypy_revision,
         workspace=str(workspace),
         manifest_path=preparation.manifest_path,
+        total_python_files=preparation.total_python_files,
+        checkout_total_python_files=preparation.checkout_total_python_files,
         typed_files=_build_group_summary(typed_files, typed_targets),
         untyped_files=_build_group_summary(untyped_files, []),
         file_results=file_results,

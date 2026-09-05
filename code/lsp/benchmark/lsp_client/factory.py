@@ -3,14 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from benchmark.lsp_client.client import FangtypeLspClient
 from benchmark.lsp_client.shim import collect_document, insert_document
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine
+    from collections.abc import Callable, Coroutine, Sequence
+
+
+def bench_cache_home() -> str:
+    """The benchmark's mypy cache directory.
+
+    One fixed path, because a run drives exactly one server process. It used to be
+    indexed per worker so that concurrent bridges never shared a cache directory, mypy
+    having no cross-process cache locking (see ``mypy_runner.py``). With the pool gone
+    there is nothing to keep apart, and a stable path keeps the cache warm across runs.
+    """
+    base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    return str(base / "fangtype-bench" / "bridge")
 
 
 class ClientBridge:
@@ -21,12 +35,27 @@ class ClientBridge:
         engine: str = "jedi",
         root_uri: str | None = None,
         timeout: float = 30.0,
+        project_root: str | None = None,
+        config_overrides: dict[str, Any] | None = None,
     ) -> None:
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
-        self._client = FangtypeLspClient(engine=engine, root_uri=root_uri, timeout=timeout)
+        self._client = FangtypeLspClient(
+            engine=engine,
+            root_uri=root_uri,
+            timeout=timeout,
+            cache_home=bench_cache_home(),
+            project_root=project_root,
+            config_overrides=config_overrides,
+        )
         self._cache: dict[tuple[str, str], tuple[list, list]] = {}
+        # Run-wide total of inlay hints that resolved to no binding, summed over every
+        # document this bridge collected. ``collect_document`` cannot return the count,
+        # because four runners unpack its two-element tuple, so it hands it here instead
+        # and ``map_over_bridge`` prints the total once, on its way out. A drop nobody
+        # counts is an evaluation number that moves with no cause attached to it.
+        self.dropped_hints = 0
         self.run_sync(self._client.start())
 
     def _run_loop(self) -> None:
@@ -42,13 +71,32 @@ class ClientBridge:
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
 
     def collect_sync(self, uri: str, source: str, did_open: bool = False) -> tuple[list, list]:
-        """Fetch (inlay hints, previewInserts) for a document, cached per (uri, source)."""
+        """Fetch (inlay hints, name-keyed facts) for a document, cached per (uri, source).
+
+        The cache is also what keeps ``dropped_hints`` honest. A repeated read of the same
+        ``(uri, source)`` never reaches the server, so it must not count its drops twice
+        either, and skipping the call skips the accumulation with it.
+        """
         key = (uri, source)
         if key not in self._cache:
             self._cache[key] = self.run_sync(
-                collect_document(self._client, uri, source, did_open=did_open)
+                collect_document(
+                    self._client,
+                    uri,
+                    source,
+                    did_open=did_open,
+                    on_dropped=self._record_dropped_hints,
+                )
             )
         return self._cache[key]
+
+    def _record_dropped_hints(self, dropped: int) -> None:
+        """Add one document's unresolvable-hint count to the run-wide total.
+
+        Called from the background loop thread, while ``run_sync`` holds the calling thread
+        on the future, so the two threads never touch the counter at the same moment.
+        """
+        self.dropped_hints += dropped
 
     def insert_sync(self, uri: str, source: str) -> tuple[bool, str | None, dict[str, int]]:
         """Insert all inferred types into ``source`` (opened as ``uri``), return
@@ -67,3 +115,53 @@ class ClientBridge:
         for task in asyncio.all_tasks(self._loop):
             task.cancel()
         self._loop.stop()
+
+
+def map_over_bridge[T, R](
+    items: Sequence[T],
+    *,
+    make_bridge: Callable[[], ClientBridge],
+    fn: Callable[[ClientBridge, T, int], R],
+    on_done: Callable[[int, T, R], None] | None = None,
+) -> list[R | None]:
+    """Run ``fn`` over ``items`` on one server process, in input order.
+
+    This replaces a pool that sharded the corpus across several server subprocesses.
+    That pool measured a configuration no user is in, because the shipped server is a
+    single long-lived process, and the sharding was not neutral: splitting 143 files
+    across eight processes kept each one's parso parse cache below the size at which
+    parso starts evicting, which raised the measured match count by roughly 250 targets
+    against running them all through one process.
+
+    ``on_done(index, item, result)`` runs as each item finishes, for progress output and
+    journal appends. It needs no lock now that nothing is concurrent. The bridge is
+    closed even if ``fn`` raises.
+
+    The bridge's ``dropped_hints`` total is printed here, on the way out, because this is
+    the one place that owns a bridge from construction to close and every runner reaches the
+    server through it. The counter was built so a silent loss of inference facts would be
+    visible, and until this line nothing read it -- which is how three whole binding forms
+    (``with`` items, ``except`` handlers, comprehension targets) went unresolved for the
+    length of a branch without any run saying so. Printing it unconditionally, rather than
+    only when it is non-zero, is deliberate: a run that reports no drops is itself the
+    signal that the hints all landed.
+    """
+    results: list[R | None] = [None] * len(items)
+    if not items:
+        return results
+
+    bridge = make_bridge()
+    try:
+        for index, item in enumerate(items):
+            result = fn(bridge, item, index)
+            results[index] = result
+            if on_done is not None:
+                on_done(index, item, result)
+    finally:
+        print(
+            f"Inlay hints that resolved to no binding: {bridge.dropped_hints} "
+            "(usage-site hints sit at a Load position and are expected here; "
+            "anything else is a fact the scoring never saw)"
+        )
+        bridge.close()
+    return results

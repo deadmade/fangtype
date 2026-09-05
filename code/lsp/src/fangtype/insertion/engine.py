@@ -1,9 +1,12 @@
 """InsertionEngine orchestrates type annotation insertions via strategies and the transformer."""
 
+import ast
 import logging
 from typing import cast
 
 import libcst as cst
+from libcst.codemod import CodemodContext
+from libcst.codemod.visitors import AddImportsVisitor
 from libcst.metadata import PositionProvider
 
 from .strategy import plan_target
@@ -16,6 +19,29 @@ from .types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _module_level_bindings(source: str) -> set[str]:
+    """Names the module binds at top level with a class, a function or a plain assignment.
+
+    Read to stop a synthesised import shadowing a name the file already owns. Unparseable
+    source yields the empty set, which restores the previous behaviour of always importing.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+
+    bound: set[str] = set()
+    for node in tree.body:
+        # Tuple rather than a `|` union: the union expression itself trips disallow_any_expr.
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            bound.add(node.name)
+        elif isinstance(node, ast.Assign):
+            bound.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            bound.add(node.target.id)
+    return bound
 
 
 class InsertionEngine:
@@ -132,6 +158,33 @@ class InsertionEngine:
             # Generate the modified source
             modified_source = modified_tree.code
 
+            # Add imports only for annotations that actually landed (not failed plans).
+            failed_ids = {id(p) for p in transformer.failed_insertions}
+            shadowed = _module_level_bindings(modified_source)
+            needed = {
+                plan.target.import_hint
+                for plan in plans
+                if id(plan) not in failed_ids
+                and plan.target.import_hint is not None
+                # A file defining its own `Callable` or `Generator` must not have ours imported
+                # over the top of it. That lands `no-redef` on the class statement, which hosts
+                # no annotation target, so the assignability gate cannot see it and the file
+                # ships shadowed.
+                and plan.target.import_hint[1] not in shadowed
+            }
+            if needed:
+                try:
+                    ctx = CodemodContext()
+                    for module, name in sorted(needed):
+                        AddImportsVisitor.add_needed_import(ctx, module, name)
+                    modified_source = (
+                        AddImportsVisitor(ctx)
+                        .transform_module(cst.parse_module(modified_source))
+                        .code
+                    )
+                except Exception as e:  # Fail-safe: keep annotated source without the import.
+                    logger.warning(f"Import insertion failed, keeping annotations only: {e}")
+
             # Get execution summary
             summary = transformer.get_execution_summary()
 
@@ -159,39 +212,6 @@ class InsertionEngine:
             error_msg = f"Transformation failed: {e}"
             logger.error(error_msg, exc_info=True)
             return InsertionResult.error_result(source, error_msg)
-
-    def preview_insertions(self, targets: list[InsertionTarget], source: str) -> dict[str, object]:
-        """Preview what insertions would be performed without executing them."""
-        try:
-            context = self._create_insertion_context(source)
-            plans, _failures = self._create_execution_plans(targets, context)
-
-            plans_by_strategy: dict[str, int] = {}
-            plan_details: list[dict[str, object]] = []
-
-            for plan in plans:
-                strategy_name = plan.strategy_name
-                plans_by_strategy[strategy_name] = plans_by_strategy.get(strategy_name, 0) + 1
-
-                plan_details.append(
-                    {
-                        "strategy": strategy_name,
-                        "target": plan.target.name,
-                        "type": plan.target.type_annotation,
-                        "line": plan.target.location.line,
-                        "transformation": plan.transformation.value,
-                    }
-                )
-
-            return {
-                "total_plans": len(plans),
-                "plans_by_strategy": plans_by_strategy,
-                "plan_details": plan_details,
-            }
-
-        except Exception as e:
-            logger.error(f"Preview failed: {e}")
-            return {"error": str(e)}
 
 
 class AnnotationFinder(cst.CSTVisitor):

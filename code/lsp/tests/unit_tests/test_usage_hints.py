@@ -123,7 +123,7 @@ class TestInlayHintHelperUsageHints:
         declaration_positions: set[tuple[int, int]] = set()
 
         hints = helper.generate_usage_hints(
-            usage_locations, usage_types, declaration_positions, None, source
+            usage_locations, usage_types, declaration_positions, source
         )
 
         assert len(hints) == 1
@@ -248,8 +248,12 @@ z = x * y"""
         # Should have hints for: x (line 2), x (line 3), y (line 3)
         assert len(hints) >= 2  # At least x usages should have hints
 
-    def test_annotation_in_another_scope_does_not_hide_a_usage_hint(self) -> None:
-        """M30: `data: dict` in one function must not suppress an unrelated `data`'s hints."""
+    def test_reads_are_hinted_whether_or_not_the_binding_is_annotated(self) -> None:
+        """Was M30 (an annotation in one scope hiding another scope's `data`).
+
+        Nothing suppresses by name any more, so that class of bug is structurally impossible and
+        both reads carry a hint, including the one whose binding is annotated.
+        """
         source = """import json
 
 
@@ -273,14 +277,51 @@ def compute_stats(items):
         usage_types = {(loc.line, loc.col): "list[int]" for loc in usage_locations}
 
         hints = helper.generate_usage_hints(
-            usage_locations, usage_types, declaration_positions, result.scope_tree, source
+            usage_locations, usage_types, declaration_positions, source
         )
 
-        # The `data` usage inside compute_stats (line 11) is unannotated -> it keeps its hint;
-        # parse_config's annotated `data` (line 6) stays skipped.
+        # Line 6 reads parse_config's annotated `data`, line 11 compute_stats' unannotated one.
         hinted_lines = {hint.position.line + 1 for hint in hints}
+        assert 6 in hinted_lines
         assert 11 in hinted_lines
-        assert 6 not in hinted_lines
+
+    def test_read_of_an_annotated_binding_is_hinted_but_the_binding_line_is_not(self) -> None:
+        """`size: int = 0` needs no hint of its own, and `return size` still gets one."""
+        source = "def widen():\n    size: int = 0\n    return size\n"
+        engine = JediInferenceEngine(Settings())
+        helper = InlayHintHelper(NameCollector(), engine, Settings())
+
+        result = engine.infer_types(source)
+        hints = asyncio.run(
+            helper.process_usage_hints(source, None, 0, len(source.splitlines()), result)
+        )
+
+        hinted = {(h.position.line, h.label) for h in hints}
+        assert (2, " int") in hinted, f"expected an int hint on `return size`, got: {hints}"
+        assert not [h for h in hints if h.position.line == 1], (
+            f"the annotated binding line must stay unhinted, got: {hints}"
+        )
+
+    def test_shadowed_local_reports_its_own_type_not_the_outer_annotation(self) -> None:
+        """The outward name walk gave the local `width` the module-level `width: int`'s hint.
+
+        Resolving at the read position instead reports the local float, so the hint is both
+        present and correct.
+        """
+        source = "width: int = 0\n\n\ndef stretch():\n    width = 1.5\n    return width\n"
+        engine = JediInferenceEngine(Settings())
+        helper = InlayHintHelper(NameCollector(), engine, Settings())
+
+        result = engine.infer_types(source)
+        hints = asyncio.run(
+            helper.process_usage_hints(source, None, 0, len(source.splitlines()), result)
+        )
+
+        read_hints = [h for h in hints if h.position.line == 5]
+        assert read_hints, f"expected a hint on `return width`, got: {hints}"
+        assert read_hints[0].label == " float", (
+            f"the local float must win over the module-level `width: int`, got: {read_hints[0]}"
+        )
 
 
 class TestProcessUsageHints:
@@ -347,3 +388,28 @@ y = x + 1"""
         assert "is_main" in thread_flags, "infer_types_at_locations was never called"
         assert thread_flags["is_main"] is False
         assert len(hints) > 0
+
+
+class TestDeclarationPositionsCoverEveryBinding:
+    """Suppression reads the whole history, not the name's last binding.
+
+    ``generate_hints_for_scope`` now emits a declaration hint per binding. If
+    ``get_declaration_positions`` still reported only ``scope.variables`` — the property that
+    collapses a name to ``types[-1]`` — an earlier binding could carry both a declaration hint
+    and a usage hint at the same position.
+    """
+
+    def test_every_binding_of_a_rebound_name_is_a_declaration_position(self) -> None:
+        """All three bindings of ``x`` are suppressed, not just the last one."""
+        source = (
+            "def f():\n    x = 1\n    for x in [1, 2]:\n        pass\n    x += 1\n    return x\n"
+        )
+        engine = JediInferenceEngine(Settings())
+        helper = InlayHintHelper(NameCollector(), engine, Settings())
+
+        positions = helper.get_declaration_positions(engine.infer_types(source).scope_tree)
+
+        # 1-based lines: the assignment, the loop target, and the augmented assignment.
+        assert {(2, 4), (3, 8), (5, 4)} <= positions, (
+            f"expected every binding of 'x' to be a declaration position, got: {positions}"
+        )

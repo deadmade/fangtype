@@ -1,13 +1,14 @@
 [project]
 name = "fangtype"
-version = "0.5.5"
+version = "0.5.15"
 description = "Python automatic type inference tool"
 authors = [{ name = "deadmade" }]
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
   "pygls==2.1.1",
   "libcst==1.8.6",
-  "mypy==1.20.1",
+  "mypy==2.1.0",
   "jedi==0.20.0",
   "injector==0.24.0",
 ]
@@ -42,27 +43,15 @@ addopts = [
   "--strict-config",
   "--cov=fangtype",
   "--cov-report=term-missing",
-  "--cov-report=html",
 ]
-norecursedirs = [
-  ".direnv",
-  ".gitlab-ci-local",
-  "vscode-extension",
-  "benchmark",
-  "benchmark/data",
-]
+norecursedirs = [".direnv", "vscode-extension", "benchmark", "benchmark/data"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-exclude = [
-  "benchmark/data/",
-  "src/test/fixtures/",
-  "../../vscode-extension/src/test/fixtures/large-test-files/",
-  "**/../../vscode-extension/src/test/fixtures/large-test-files/*.py",
-]
+exclude = ["benchmark/data/"]
 
 [tool.ruff.lint]
 select = [

@@ -98,6 +98,9 @@ class _TypeRemovalTransformer(cst.CSTTransformer):
     ) -> None:
         self._targets = targets
         self._include_functions = include_functions
+        # Innermost binding scope, so a bare declaration in a method is told apart from one in
+        # a class body. Only the top of the stack matters; a def inside a class re-opens.
+        self._scopes: list[str] = []
         self._line = line  # 1-based; None means every line (whole-file removal).
         self._summary = RemovalSummary(requested_targets=targets.copy() if targets else None)
 
@@ -108,7 +111,7 @@ class _TypeRemovalTransformer(cst.CSTTransformer):
 
     def leave_AnnAssign(
         self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign
-    ) -> cst.BaseSmallStatement:
+    ) -> cst.BaseSmallStatement | cst.RemovalSentinel:
         metadata = self.get_metadata(PositionProvider, original_node)
         target_name = _target_name(original_node.target)
         if target_name is None or not self._should_process(target_name, metadata.start.line):
@@ -116,8 +119,13 @@ class _TypeRemovalTransformer(cst.CSTTransformer):
 
         target_kind = "attribute" if isinstance(original_node.target, cst.Attribute) else "variable"
         if original_node.value is None:
-            self._summary.record_skip(target_name, "no value", metadata.start.line)
-            return updated_node
+            return self._remove_declaration(
+                updated_node,
+                target_name,
+                original_node.annotation,
+                metadata.start.line,
+                target_kind,
+            )
 
         equal = original_node.equal
         before: cst.SimpleWhitespace = cst.SimpleWhitespace(" ")
@@ -144,9 +152,46 @@ class _TypeRemovalTransformer(cst.CSTTransformer):
         )
         return assign
 
+    def _remove_declaration(
+        self,
+        updated_node: cst.AnnAssign,
+        target_name: str,
+        annotation: cst.Annotation,
+        line: int,
+        target_kind: str,
+    ) -> cst.BaseSmallStatement | cst.RemovalSentinel:
+        """Delete a value-less ``x: int``, which is the standalone declaration the insertion
+        path writes when PEP 526 cannot annotate the binding in place.
+
+        There is no assignment underneath to fall back to, so the inverse of writing the line
+        is deleting it. Class scope is the exception -- there a bare declaration MAY be a
+        field of a dataclass, TypedDict or NamedTuple, and this method tests the scope alone,
+        so it cannot tell. Dropping it would then remove a member rather than a type claim,
+        which is more than a removal request asks for.
+        """
+        if self._scopes and self._scopes[-1] == "class":
+            self._summary.record_skip(target_name, "class-level declaration", line)
+            return updated_node
+
+        self._summary.record_removal(target_name, annotation, line, target_kind=target_kind)
+        return cst.RemoveFromParent()
+
+    def visit_ClassDef(self, node: cst.ClassDef) -> None:
+        self._scopes.append("class")
+
+    def leave_ClassDef(
+        self, original_node: cst.ClassDef, updated_node: cst.ClassDef
+    ) -> cst.ClassDef:
+        self._scopes.pop()
+        return updated_node
+
+    def visit_FunctionDef(self, node: cst.FunctionDef) -> None:
+        self._scopes.append("function")
+
     def leave_FunctionDef(
         self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef
     ) -> cst.FunctionDef:
+        self._scopes.pop()
         if not self._include_functions:
             return updated_node
 
@@ -235,9 +280,12 @@ class RemovalEngine:
         return modified.code, transformer.summary()
 
     def preview_removals(
-        self, source: str, variables: list[str] | None = None
+        self,
+        source: str,
+        variables: list[str] | None = None,
+        include_functions: bool = False,
     ) -> dict[str, object]:
-        _, transformer = self._run(source, variables, include_functions=False)
+        _, transformer = self._run(source, variables, include_functions)
         summary = transformer.summary()
         summary["total_changes"] = summary["removed_count"]
         return summary

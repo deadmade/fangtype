@@ -242,7 +242,7 @@ class TestDiagnosticsAsync:
         asyncio.run(run_test())
 
     def test_run_diagnostics_offloaded_to_thread(self) -> None:
-        """Verify that _run_diagnostics_async calls run_diagnostics."""
+        """Verify _run_diagnostics_async runs diagnostics then forces an inlay re-pull."""
 
         async def run_test() -> None:
             mock_validator = MagicMock()
@@ -250,6 +250,7 @@ class TestDiagnosticsAsync:
             engine = DiagnosticEngine(mock_validator, Settings())
             mock_ls = MagicMock()
             mock_ls.workspace.get_text_document.return_value.source = "x = 1"
+            mock_ls.workspace_inlay_hint_refresh_async = AsyncMock()
             uri = "file:///test.py"
 
             with patch.object(engine, "run_diagnostics", new_callable=AsyncMock) as mock_run:
@@ -260,5 +261,7 @@ class TestDiagnosticsAsync:
                 args, _ = mock_run.call_args
                 assert args[0] == mock_ls
                 assert args[1] == uri
+                # The debounced change path must settle inlay hints (unlike did_change itself).
+                mock_ls.workspace_inlay_hint_refresh_async.assert_awaited_once_with(None)
 
         asyncio.run(run_test())

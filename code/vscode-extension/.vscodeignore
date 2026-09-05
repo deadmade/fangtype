@@ -10,8 +10,6 @@ test/**
 
 # Build Configuration
 tsconfig.json
-tsconfig.test.json
-esbuild.js
 eslint.config.mjs
 
 # Test Files
@@ -25,9 +23,6 @@ test-results.xml
 # Build Output
 out/**
 *.map
-
-# Retired PyInstaller server binary (server now runs from bundled/ sources)
-dist/fangtype-server
 
 # Python bytecode caches: bundled/libs + bundled/tool sources must ship, caches
 # must not. Repo-wide so stray caches (e.g. __pycache__/noxfile.pyc created when

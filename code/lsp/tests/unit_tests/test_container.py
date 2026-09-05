@@ -55,11 +55,14 @@ class TestContainerWiring:
         assert isinstance(diagnostic_engine, DiagnosticEngine)
         assert diagnostic_engine is container.get(DiagnosticEngine)
 
-        # CodeActionHelper
+        # CodeActionHelper. It reaches every engine through the workflow, which is the same
+        # singleton the insert requests use, so the lightbulb and the requests cannot diverge.
+        from fangtype.workflow import TypeAnnotationWorkflow
+
         ca_helper = container.get(CodeActionHelper)
         assert isinstance(ca_helper, CodeActionHelper)
-        assert hasattr(ca_helper, "insertion_engine")
-        assert ca_helper.insertion_engine is container.get(InsertionEngine)
+        assert hasattr(ca_helper, "workflow")
+        assert ca_helper.workflow is container.get(TypeAnnotationWorkflow)
 
         # InlayHintHelper
         ih_helper = container.get(InlayHintHelper)
@@ -79,19 +82,16 @@ class TestContainerIntegration:
         assert result is not None
         assert result.scope_tree is not None
 
-    def test_type_validator_works(self, sample_source: str) -> None:
+    def test_type_validator_works(self) -> None:
         """Test that type validator actually works."""
         container = build_container()
         validator = container.get(TypeValidatorProtocol)
 
-        # Should be able to validate types
-        valid_result = asyncio.run(validator.validate_bulk({"_single": "int"}, sample_source))
-        assert valid_result["_single"].is_valid is True
+        # A well-typed file is clean; a mistyped assignment is reported.
+        assert asyncio.run(validator.validate_file_full("ok: int = 1\n")) == []
 
-        invalid_result = asyncio.run(
-            validator.validate_bulk({"_single": "NonExistentType"}, sample_source)
-        )
-        assert invalid_result["_single"].is_valid is False
+        broken = asyncio.run(validator.validate_file_full("bad: str = 1\n"))
+        assert [d.error_code for d in broken] == ["assignment"]
 
     def test_insertion_engine_works(self) -> None:
         """Test that insertion engine actually works."""
@@ -224,3 +224,49 @@ class TestResolveEngineName:
         from fangtype.container import resolve_engine_name
 
         assert resolve_engine_name("does-not-exist") == "jedi"
+
+
+def test_insert_writes_forward_references_that_import_end_to_end():
+    """A signature naming its own class must be quoted, or the module dies on import <3.14."""
+    from fangtype.workflow import TypeAnnotationWorkflow
+
+    source = (
+        "class Node:\n"
+        "    def link(self, other):\n"
+        "        return other\n"
+        "\n"
+        "\n"
+        "n = Node()\n"
+        "n.link(Node())\n"
+    )
+    workflow = build_container("jedi").get(TypeAnnotationWorkflow)
+
+    modified, _var_count, _func_count, _msg = asyncio.run(
+        workflow.insert_all_types(source, "main.py")
+    )
+
+    assert 'other: "Node"' in modified
+    assert "other: Node" not in modified
+    # The receiver is declined outright rather than quoted.
+    assert "self:" not in modified
+    ast.parse(modified)
+    # A smoke check only. Under PEP 649 the interpreter running these tests evaluates no
+    # annotation at class-body time, so exec cannot reproduce the <3.14 NameError. The
+    # assertion on the quoted form above is what actually guards the regression.
+    exec(compile(modified, "main.py", "exec"), {})
+
+
+def test_insert_leaves_an_already_bound_class_unquoted_end_to_end():
+    """Regression guard: quoting is conditional, not blanket."""
+    from fangtype.workflow import TypeAnnotationWorkflow
+
+    source = "class Early:\n    pass\n\n\ndef use(e):\n    return e\n\n\nuse(Early())\n"
+    workflow = build_container("jedi").get(TypeAnnotationWorkflow)
+
+    modified, _var_count, _func_count, _msg = asyncio.run(
+        workflow.insert_all_types(source, "main.py")
+    )
+
+    assert "e: Early" in modified
+    assert 'e: "Early"' not in modified
+    exec(compile(modified, "main.py", "exec"), {})

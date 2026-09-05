@@ -85,7 +85,7 @@ class TestScopeBuilderRecordsAndPreservesInference:
         result = engine.infer_types(_COMPREHENSION_SRC)
         module = result.scope_tree.root
         helper = InlayHintHelper.__new__(InlayHintHelper)  # bypass @inject constructor
-        hints = helper.generate_hints_for_scope(module, _COMPREHENSION_SRC, None, "module")
+        hints = helper.generate_hints_for_scope(module, _COMPREHENSION_SRC)
         var_hints = [
             h
             for h in hints

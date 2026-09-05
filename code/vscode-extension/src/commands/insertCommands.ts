@@ -2,7 +2,12 @@ import { commands, window, workspace, Uri, EventEmitter } from 'vscode';
 import type { TextEditor, OutputChannel, Disposable } from 'vscode';
 import { LanguageClient } from 'vscode-languageclient/node';
 import type { FangtypeResult } from '../types';
-import { lspWorkspaceEditToVscode, workspaceEditToPreviewText } from '../lsp/editUtils';
+import {
+    canApplyWholeFileReplace,
+    lspWorkspaceEditToVscode,
+    workspaceEditToPreviewText,
+} from '../lsp/editUtils';
+import { sendRequestWithTimeout } from '../lsp/requestTimeout';
 import * as path from 'path';
 
 /** Scheme for the insert-all diff's proposed side; an untitled doc would linger as a saveable tab. */
@@ -36,11 +41,12 @@ export async function insertTypeAtCursor(
         );
 
         // Send request to server - let the server figure out the variable and type
-        const result = await client.sendRequest<FangtypeResult>('fangtype/insertType', [
-            uri,
-            position.line,
-            position.character,
-        ]);
+        const result = await sendRequestWithTimeout<FangtypeResult>(
+            client,
+            'fangtype/insertType',
+            [uri, position.line, position.character],
+            'Insert type annotation'
+        );
 
         outputChannel.appendLine(`Result: ${JSON.stringify(result)}`);
 
@@ -48,15 +54,24 @@ export async function insertTypeAtCursor(
             // Convert LSP WorkspaceEdit JSON to VSCode format
             const { edit: vscodeEdit, versions } = lspWorkspaceEditToVscode(result.edits);
 
-            // Abort if the document moved on since the server computed the replacement.
+            // Abort if the server never saw this buffer, or the buffer moved on.
             const expectedVersion = versions.get(uri);
-            if (expectedVersion != null && document.version !== expectedVersion) {
-                outputChannel.appendLine(
-                    `Document changed (expected v${expectedVersion}, got v${document.version}); aborting`
-                );
-                window.showWarningMessage(
-                    'Document changed since the type was computed — please retry.'
-                );
+            if (!canApplyWholeFileReplace(expectedVersion, document.version)) {
+                if (expectedVersion === null) {
+                    outputChannel.appendLine(
+                        'Server returned version null for a whole-file replace; aborting'
+                    );
+                    window.showWarningMessage(
+                        'Cannot apply a whole-file replace without a document version — please retry.'
+                    );
+                } else {
+                    outputChannel.appendLine(
+                        `Document changed (expected v${expectedVersion}, got v${document.version}); aborting`
+                    );
+                    window.showWarningMessage(
+                        'Document changed since the type was computed — please retry.'
+                    );
+                }
                 return;
             }
 
@@ -88,9 +103,12 @@ export async function insertAllTypesInFile(
     try {
         const uri = editor.document.uri.toString();
 
-        const result = await client.sendRequest<FangtypeResult>('fangtype/insertTypesInFile', [
-            uri,
-        ]);
+        const result = await sendRequestWithTimeout<FangtypeResult>(
+            client,
+            'fangtype/insertTypesInFile',
+            [uri],
+            'Insert all type annotations'
+        );
 
         if (result.success && result.edits) {
             const previewText = workspaceEditToPreviewText(

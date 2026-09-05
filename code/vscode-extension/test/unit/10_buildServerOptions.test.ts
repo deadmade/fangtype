@@ -23,7 +23,6 @@ function makeSettings(overrides: Partial<ISettings> = {}): ISettings {
         interpreter: [],
         installMode: 'managed',
         mypyEnabled: true,
-        mypyInferenceValidationEnabled: false,
         diagnosticSeverity: 'information',
         crossFileContractsEnabled: true,
         logLevel: 'warning',

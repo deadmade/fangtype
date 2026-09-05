@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from injector import inject
 from lsprotocol import types
 
-from fangtype.analysis import NameCollector, NameLocation, ScopeType
+from fangtype.analysis import NameCollector, NameLocation, ScopeType, is_implicit_receiver
 from fangtype.protocols import InferenceEngineProtocol  # noqa: TC001
 from fangtype.utils.position_encoding import codepoint_to_utf16
 from fangtype.utils.settings import Settings  # noqa: TC001
@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     from fangtype.analysis import Scope, ScopeTree
     from fangtype.cancellation import CancellationToken
     from fangtype.inference.inference_result import InferenceResult
-    from fangtype.validation.mypy_validator import TypeValidationResult
 
 logger = logging.getLogger(__name__)
 
@@ -121,22 +120,10 @@ class InlayHintHelper:
 
         return annotated_vars
 
-    @staticmethod
-    def _validity_for(
-        validation_results: dict[str, TypeValidationResult] | None, validation_key: str
-    ) -> bool | None:
-        """Return key validity: None = don't emit; None results-dict = validation off, all valid."""
-        if validation_results is None:
-            return True
-        result = validation_results.get(validation_key)
-        return result.is_valid if result is not None else None
-
     def generate_hints_for_scope(
         self,
         scope: Scope,
         source: str,
-        validation_results: dict[str, TypeValidationResult] | None,
-        scope_id: str,
     ) -> list[types.InlayHint]:
         """Generate inlay hints for all variables/parameters/returns in a scope."""
         hints: list[types.InlayHint] = []
@@ -146,31 +133,41 @@ class InlayHintHelper:
         # Generate hints for local variables
         annotated_vars = self.get_annotated_variable_names(scope)
 
-        for var_name, type_info in scope.variables.items():
+        # One hint per binding, not per name. `scope.variables` collapses a name's history to
+        # `types[-1]`, so a name bound twice with different types used to be offered only at its
+        # last binding even though the write path (`per_binding=True`) can annotate the earlier
+        # one. Iterating the history closes that gap between what the tool draws and what it
+        # can write.
+        for var_name, history in scope.variable_history.items():
             # Skip if already annotated
             if var_name in annotated_vars:
                 continue
 
-            # Skip if type is Unknown or invalid position
-            if type_info.type_str == "Unknown":
-                continue
-            if type_info.line < 0 or type_info.col < 0:
-                logger.warning(
-                    f"Invalid position for variable {var_name}: "
-                    f"line={type_info.line}, col={type_info.col}"
-                )
-                continue
+            # Refinement passes append out of order, so several TypeInfos can share a line and
+            # only one of them is the binding's real type. Group by line and let
+            # `get_variable_type_at_line` pick the winner: it already owns that tie-break, and a
+            # second copy of the rule here would drift from it invisibly.
+            for line in sorted({entry.line for entry in history}):
+                type_info = scope.get_variable_type_at_line(var_name, line)
+                if type_info is None:
+                    continue
 
-            # Check if type was validated - show all types, mark invalid ones
-            validation_key = f"{scope_id}.var.{var_name}"
-            is_valid = self._validity_for(validation_results, validation_key)
-            if is_valid is not None:
+                # Skip if type is Unknown or invalid position
+                if type_info.type_str == "Unknown":
+                    continue
+                if type_info.line < 0 or type_info.col < 0:
+                    logger.warning(
+                        f"Invalid position for variable {var_name}: "
+                        f"line={type_info.line}, col={type_info.col}"
+                    )
+                    continue
+
                 hint = self._build_type_hint(
                     type_info.line,
                     self._col_to_utf16(hint_lines, type_info.line, type_info.col + len(var_name)),
                     " ",
                     type_info.type_str,
-                    is_valid,
+                    True,
                 )
                 hints.append(hint)
 
@@ -192,9 +189,16 @@ class InlayHintHelper:
                     if arg is not None and arg.annotation
                 }
 
+                in_class = scope.parent is not None and scope.parent.scope_type == ScopeType.CLASS
+
                 for param_name, type_info in scope.parameters.items():
                     # Skip if already annotated
                     if param_name in annotated_params:
+                        continue
+
+                    # Skip a method's receiver: insertion declines it, so proposing it would
+                    # offer the developer a hint that accepting does nothing with.
+                    if is_implicit_receiver(func_node, param_name, in_class=in_class):
                         continue
 
                     # Skip if type is Unknown or invalid position
@@ -207,29 +211,22 @@ class InlayHintHelper:
                         )
                         continue
 
-                    # Check if type was validated - show all types, mark invalid ones
-                    validation_key = f"{scope_id}.param.{param_name}"
-                    is_valid = self._validity_for(validation_results, validation_key)
-                    if is_valid is not None:
-                        hint = self._build_type_hint(
-                            type_info.line,
-                            self._col_to_utf16(
-                                hint_lines, type_info.line, type_info.col + len(param_name)
-                            ),
-                            ": ",
-                            type_info.type_str,
-                            is_valid,
-                        )
-                        hints.append(hint)
+                    hint = self._build_type_hint(
+                        type_info.line,
+                        self._col_to_utf16(
+                            hint_lines, type_info.line, type_info.col + len(param_name)
+                        ),
+                        ": ",
+                        type_info.type_str,
+                        True,
+                    )
+                    hints.append(hint)
 
                 # Generate return type hint
-                validation_key = f"{scope_id}.return"
-                return_is_valid = self._validity_for(validation_results, validation_key)
                 if (
                     scope.return_type
                     and scope.return_type.type_str != "Unknown"
                     and not func_node.returns
-                    and return_is_valid is not None
                 ):
                     # Anchor after the signature's ')' — which may not be on the def line.
                     signature_end = _signature_end(hint_lines, func_node)
@@ -240,7 +237,7 @@ class InlayHintHelper:
                             codepoint_to_utf16(hint_lines[close_line], close_col),
                             " -> ",
                             scope.return_type.type_str,
-                            return_is_valid,
+                            True,
                         )
                         hints.append(hint)
 
@@ -288,7 +285,6 @@ class InlayHintHelper:
                 usage_locations,
                 usage_types,
                 declaration_positions,
-                inference_result.scope_tree,
                 source,
             )
             hints.extend(usage_hints)
@@ -303,44 +299,26 @@ class InlayHintHelper:
 
         return hints
 
-    def _is_annotated_at_declaration(
-        self, scope_tree: ScopeTree, line_0_based: int, name: str, cache: dict[str, set[str]]
-    ) -> bool:
-        """True if `name` is annotated in the scope enclosing the line, or an enclosing one."""
-        scope: Scope | None = scope_tree.find_scope_for_line(line_0_based)
-        while scope is not None:
-            annotated = cache.get(scope.scope_id)
-            if annotated is None:
-                annotated = self.get_annotated_variable_names(scope)
-                cache[scope.scope_id] = annotated
-            if name in annotated:
-                return True
-            scope = scope.parent
-        return False
-
     def generate_usage_hints(
         self,
         usage_locations: list[NameLocation],
         usage_types: dict[tuple[int, int], str],
         declaration_positions: set[tuple[int, int]],
-        scope_tree: ScopeTree | None = None,
         source: str | None = None,
     ) -> list[types.InlayHint]:
-        """Generate inlay hints for name usage sites, skipping declarations/annotated names."""
+        """Generate inlay hints for name usage sites, skipping only the declaration sites.
+
+        A read is hinted whether or not its binding carries an annotation, matching parameters,
+        which were never suppressed. The type comes from inference at this position rather than
+        from matching the name up the scope chain, which is what stops a shadowed local from
+        reporting an outer binding's type.
+        """
         hints: list[types.InlayHint] = []
         usage_lines = source.splitlines() if source is not None else None
-        annotated_by_scope: dict[str, set[str]] = {}
 
         for loc in usage_locations:
             # Skip declaration sites (they have their own hints)
             if (loc.line, loc.col) in declaration_positions:
-                continue
-
-            # Skip names annotated where they're declared — resolved through this usage's own
-            # scope chain, so an unrelated same-named annotation elsewhere can't hide the hint.
-            if scope_tree is not None and self._is_annotated_at_declaration(
-                scope_tree, loc.line - 1, loc.name, annotated_by_scope
-            ):
                 continue
 
             # Get the type for this location
@@ -371,15 +349,20 @@ class InlayHintHelper:
         positions: set[tuple[int, int]] = set()
 
         for scope in scope_tree.scopes_by_id.values():
-            # Variable declarations
-            for type_info in scope.variables.values():
-                if type_info.line >= 0 and type_info.col >= 0:
-                    # TypeInfo uses 0-based lines, convert to 1-based
-                    positions.add((type_info.line + 1, type_info.col))
+            # Variable declarations. Every binding in the history, not just the name's last one:
+            # declaration hints are now emitted per binding, so suppressing only the last would
+            # leave an earlier binding carrying both a declaration hint and a usage hint at the
+            # same position.
+            for history in scope.variable_history.values():
+                for type_info in history:
+                    if type_info.line >= 0 and type_info.col >= 0:
+                        # TypeInfo uses 0-based lines, convert to 1-based
+                        positions.add((type_info.line + 1, type_info.col))
 
             # Parameter declarations
             for type_info in scope.parameters.values():
                 if type_info.line >= 0 and type_info.col >= 0:
+                    # TypeInfo uses 0-based lines, convert to 1-based
                     positions.add((type_info.line + 1, type_info.col))
 
         return positions

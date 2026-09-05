@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Literal, TypedDict
 
+from fangtype.analysis.types import ImportHint
+
 
 class TargetType(Enum):
     """Types of insertion targets supported by the unified engine."""
@@ -64,6 +66,7 @@ class InsertionTarget:
     location: CodeLocation
     type_annotation: str
     name: str  # Variable/parameter name
+    import_hint: ImportHint | None = None  # (module, name) to add if this annotation lands
 
     def __post_init__(self) -> None:
         """Validate target data."""

@@ -18,11 +18,8 @@ VALID_LOG_LEVELS = {"debug", "info", "warning", "error", "critical"}
 class Settings:
     """Settings for the fangtype server, updatable via workspace/didChangeConfiguration."""
 
-    # Whether to run mypy validation for diagnostics
+    # Whether to run mypy at all: the insert-path assignability gate and push diagnostics.
     mypy_enabled: bool = True
-
-    # Whether to run mypy validation for inference results (e.g. inlay hints)
-    mypy_inference_validation_enabled: bool = False
 
     # Minimum severity for diagnostics (error, warning, information, hint)
     diagnostic_severity: str = "information"
@@ -99,7 +96,6 @@ class Settings:
 
             if normalized_key in {
                 "mypy_enabled",
-                "mypy_inference_validation_enabled",
                 "cross_file_contracts_enabled",
             }:
                 if isinstance(value, bool):

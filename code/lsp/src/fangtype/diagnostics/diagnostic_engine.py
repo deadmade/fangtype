@@ -111,6 +111,9 @@ class DiagnosticEngine:
             doc = ls.workspace.get_text_document(uri)
             source = doc.source
             await self.run_diagnostics(ls, uri, source)
+            # Force a clean inlay re-pull so hints settle after a change (e.g. an applied insert);
+            # VSCode's own re-pull can stick if it gets cancelled, leaving stale hints.
+            await ls.workspace_inlay_hint_refresh_async(None)
         except Exception as e:
             logger.debug(f"Could not run diagnostics for {uri}: {e}")
 

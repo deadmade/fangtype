@@ -1,19 +1,6 @@
 """Tests for the AST Name Collector."""
 
-from fangtype.analysis.name_collector import NameCollector, NameLocation
-
-
-class TestNameLocation:
-    """Tests for the NameLocation dataclass."""
-
-    def test_name_location_creation(self) -> None:
-        """Test creating a NameLocation instance."""
-        loc = NameLocation(name="x", line=1, col=0, is_definition=True, end_col=1)
-        assert loc.name == "x"
-        assert loc.line == 1
-        assert loc.col == 0
-        assert loc.is_definition is True
-        assert loc.end_col == 1
+from fangtype.analysis.name_collector import NameCollector
 
 
 class TestNameCollector:

@@ -11,8 +11,25 @@ function toVscodeTextEdits(textEdits: LspTextEdit[]): TextEdit[] {
     });
 }
 
-/** Per-URI version an edit was computed against; null = don't care, else checked pre-apply. */
+/** Per-URI version an edit was computed against; null refuses a whole-file replace. */
 type EditVersions = Map<string, number | null>;
+
+/**
+ * Whether a whole-file replacement may be applied to the live editor buffer.
+ *
+ * `null` means the server never opened this document (pygls reads from disk).
+ * Applying that overwrite would discard unsaved edits. A number must match the
+ * buffer version. `undefined` is the legacy unversioned `changes` form.
+ */
+export function canApplyWholeFileReplace(
+    expectedVersion: number | null | undefined,
+    documentVersion: number
+): boolean {
+    if (expectedVersion === null) {
+        return false;
+    }
+    return expectedVersion === undefined || expectedVersion === documentVersion;
+}
 
 /**
  * Convert an LSP WorkspaceEdit (versioned `documentChanges`, else legacy `changes`) to VSCode form.
