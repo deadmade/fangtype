@@ -68,7 +68,6 @@ def mock_type_validator() -> MagicMock:
     mock = create_autospec(TypeValidatorProtocol, instance=True)
 
     # Set up default return values
-    mock.validate_bulk.return_value = {}
     mock.validate_file_full.return_value = []
 
     return mock
@@ -89,12 +88,6 @@ def mock_insertion_engine() -> MagicMock:
     mock_result.failed_targets = []
 
     mock.insert.return_value = mock_result
-    mock.preview_insertions.return_value = {
-        "success": True,
-        "total_plans": 0,
-        "plans_by_strategy": {},
-        "plan_details": [],
-    }
 
     return mock
 

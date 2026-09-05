@@ -83,6 +83,106 @@ def test_attribute_augassign_prefers_plain_assignment_candidate() -> None:
     assert resolved.target_type == TargetType.ATTRIBUTE_ACCESS
 
 
+def test_augassign_prefers_earlier_plain_assignment_in_same_scope() -> None:
+    """The accumulator idiom must annotate `total = 0`, not splice a declaration in the loop.
+
+    Regression for the declaration-splice defect: the newest binding of `total` is the `+=`,
+    which forces a DECLARATION above a line *inside* the loop body, and mypy then reports
+    `no-redef` against the plain assignment above it.
+    """
+    source = "def subtotal(cart):\n    total = 0\n    for name in cart:\n        total += cart[name]\n    return total\n"
+    index = build_source_index(source)
+    assert index is not None
+
+    resolved = find_assignment_target_indexed(index, "total", 3)
+    assert resolved is not None
+    assert resolved.line_1_based == 2
+    assert resolved.target_type == TargetType.VARIABLE_SIMPLE
+
+
+def test_augassign_preference_does_not_cross_a_function_boundary() -> None:
+    """`assignment_candidates_by_name` is keyed by bare name file-wide, so preferring an
+    earlier binding must not reach into another function that reuses the name."""
+    source = (
+        "def f():\n"
+        "    total = 0\n"
+        "    total += 1\n"
+        "    return total\n"
+        "\n"
+        "def g():\n"
+        "    total = 0\n"
+        "    total += 2\n"
+        "    return total\n"
+    )
+    index = build_source_index(source)
+    assert index is not None
+
+    resolved = find_assignment_target_indexed(index, "total", 7)
+    assert resolved is not None
+    assert resolved.line_1_based == 7
+    assert resolved.target_type == TargetType.VARIABLE_SIMPLE
+
+
+def test_walrus_prefers_earlier_plain_assignment() -> None:
+    source = "word = ''\nif (word := compute()):\n    pass\n"
+    index = build_source_index(source)
+    assert index is not None
+
+    resolved = find_assignment_target_indexed(index, "word", 1)
+    assert resolved is not None
+    assert resolved.line_1_based == 1
+    assert resolved.target_type == TargetType.VARIABLE_SIMPLE
+
+
+def test_walrus_without_prior_assignment_keeps_its_declaration() -> None:
+    source = "if (word := compute()):\n    pass\n"
+    index = build_source_index(source)
+    assert index is not None
+
+    resolved = find_assignment_target_indexed(index, "word", 0)
+    assert resolved is not None
+    assert resolved.line_1_based == 1
+    assert resolved.target_type == TargetType.VARIABLE_COMPLEX
+
+
+def test_iteration_variable_prefers_earlier_plain_assignment() -> None:
+    """A loop target that rebinds an existing name would also earn `no-redef`."""
+    source = "item = first()\nfor item in seq:\n    use(item)\n"
+    index = build_source_index(source)
+    assert index is not None
+
+    resolved = find_assignment_target_indexed(index, "item", 1)
+    assert resolved is not None
+    assert resolved.line_1_based == 1
+    assert resolved.target_type == TargetType.VARIABLE_SIMPLE
+
+
+def test_bare_loop_target_still_declares_above_the_for() -> None:
+    source = "for item in seq:\n    use(item)\n"
+    index = build_source_index(source)
+    assert index is not None
+
+    resolved = find_assignment_target_indexed(index, "item", 0)
+    assert resolved is not None
+    assert resolved.line_1_based == 1
+    assert resolved.target_type == TargetType.ITERATION_VARIABLE
+
+
+def test_declaration_without_an_inplace_candidate_uses_the_earliest_binding() -> None:
+    """With only declaration-forcing bindings the declaration goes above the first of them,
+    never above a later one that an earlier binding already precedes."""
+    source = (
+        "def f(seq):\n    for total in seq:\n        pass\n    for total in seq:\n        pass\n"
+    )
+    index = build_source_index(source)
+    assert index is not None
+
+    resolved = find_assignment_target_indexed(index, "total", 3)
+    assert resolved is not None
+    assert resolved.line_1_based == 2
+    assert resolved.target_type == TargetType.ITERATION_VARIABLE
+
+
 def test_assignment_uses_line_hint_at_or_before() -> None:
     source = "x = 1\nx = 2\nx = 3\n"
     index = build_source_index(source)

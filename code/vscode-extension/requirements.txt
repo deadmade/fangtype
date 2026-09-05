@@ -4,6 +4,8 @@
 #
 #    pip-compile --output-file=requirements.txt ../lsp/pyproject.toml
 #
+ast-serialize==0.8.0
+    # via mypy
 attrs==26.1.0
     # via
     #   cattrs
@@ -23,7 +25,7 @@ librt==0.12.0
     # via mypy
 lsprotocol==2025.0.0
     # via pygls
-mypy==1.20.1
+mypy==2.1.0
     # via fangtype (../lsp/pyproject.toml)
 mypy-extensions==1.1.0
     # via mypy

@@ -19,6 +19,7 @@ from fangtype.inference.jedi.type_formatter import (
     extract_type_hint,
     format_types,
     infer_return_type,
+    resolve_import,
 )
 from fangtype.inference.override_inference import (
     annotation_includes_none,
@@ -29,6 +30,7 @@ from fangtype.inference.type_recovery import (
     literal_container_annotation,
     recover_return_union_from_node,
 )
+from fangtype.inference.type_utils import import_for_annotation
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -155,6 +157,23 @@ def get_scope_key(scope: Scope) -> str:
     return own
 
 
+def safe_parent(name: Any) -> Any:
+    """``name.parent()``, or ``None`` when Jedi cannot resolve it.
+
+    Jedi reaches into parso's module-global parse cache through an unguarded
+    ``parser_cache[grammar._hashed][path]`` (``jedi/parser_utils.py``), so a name whose
+    module has been evicted raises ``KeyError`` from deep inside ``parent()``. Every
+    caller here already treats an unresolvable parent as "attach it to module scope", so
+    returning ``None`` costs that one name its exact scope instead of costing the whole
+    file every type. This mirrors the per-name handling ``name.infer()`` already gets.
+    """
+    try:
+        return name.parent()
+    except Exception as e:
+        logger.debug("Failed to resolve parent of '%s': %s", getattr(name, "name", "?"), e)
+        return None
+
+
 def find_parent_scope(
     parent_jedi: Any,
     scope_map: dict[tuple[str | None, str, int | None], Scope],
@@ -164,7 +183,7 @@ def find_parent_scope(
     if parent_jedi is None or parent_jedi.type == "module":
         return module_scope
 
-    grandparent = parent_jedi.parent()
+    grandparent = safe_parent(parent_jedi)
     grandparent_name = get_scope_name(grandparent)
     parent_key = (grandparent_name, parent_jedi.name, parent_jedi.line)
 
@@ -196,7 +215,23 @@ def build_scope_tree(
 
     names = list(script.get_names(all_scopes=True, definitions=True, references=False))
     if not names:
-        logger.warning("No names provided to build scope tree")
+        # A module with nothing but comments or a docstring really has no names, and that
+        # tree is correct and cacheable. A module with actual statements has names, so
+        # Jedi returning none means the analysis failed -- most often a parso parse-cache
+        # miss deep inside name resolution. Mark it degraded so DocumentCache refuses it
+        # rather than serving the failure until the document is edited.
+        substantive = [
+            node
+            for node in tree.body
+            if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant))
+        ]
+        if substantive:
+            logger.warning(
+                "Jedi returned no names for a module with %d statements; "
+                "treating the scope tree as degraded",
+                len(substantive),
+            )
+            scope_tree.degraded = True
         return scope_tree
 
     # Build AST node map for proper line ranges
@@ -218,7 +253,7 @@ def build_scope_tree(
         if name.type not in ("function", "class"):
             continue
 
-        parent_scope = find_parent_scope(name.parent(), scope_map, module_scope)
+        parent_scope = find_parent_scope(safe_parent(name), scope_map, module_scope)
 
         scope_type = ScopeType.FUNCTION if name.type == "function" else ScopeType.CLASS
         scope_id_prefix = "func" if name.type == "function" else "class"
@@ -254,14 +289,14 @@ def build_scope_tree(
         scope_tree.add_scope(new_scope)
         parent_scope.children.append(new_scope)
 
-        scope_key = (get_scope_name(name.parent()), name.name, name.line)
+        scope_key = (get_scope_name(safe_parent(name)), name.name, name.line)
         scope_map[scope_key] = new_scope
 
     # Second pass: Add variables, parameters, and infer types
     for name in names:
         if cancel_token is not None and cancel_token.cancelled():
             break
-        parent_scope = find_parent_scope(name.parent(), scope_map, module_scope)
+        parent_scope = find_parent_scope(safe_parent(name), scope_map, module_scope)
 
         if name.type == "param":
             try:
@@ -276,11 +311,17 @@ def build_scope_tree(
                 and not annotation_includes_none(type_str)
             ):
                 type_str = f"{type_str} | None"
+            import_hint = (
+                resolve_import(inferences[0], script.path, type_str)
+                if len(inferences) == 1
+                else import_for_annotation(type_str)
+            )
             type_info = TypeInfo(
                 type_str=type_str,
                 source=TypeSource.LITERAL,
                 line=name.line - 1,
                 col=name.column,
+                import_hint=import_hint,
             )
             parent_scope.add_parameter(name.name, type_info)
 
@@ -295,17 +336,26 @@ def build_scope_tree(
                 type_str = "Callable"
             else:
                 type_str = extract_type_hint(name, inferences) or format_types(inferences)
+            # ponytail: only the top-level concrete type's import is captured; element types
+            # inside generics/unions (list[Decimal], dict[str, MyClass]) are not resolved.
+            # Upgrade path: per-element Jedi inference on the subscript value if needed.
+            import_hint = (
+                resolve_import(inferences[0], script.path, type_str)
+                if len(inferences) == 1
+                else import_for_annotation(type_str)
+            )
             type_info = TypeInfo(
                 type_str=type_str,
                 source=TypeSource.LITERAL,
                 line=(name.line - 1) if name.line is not None else 0,
                 col=name.column if name.column is not None else 0,
                 ast_node=None,
+                import_hint=import_hint,
             )
             parent_scope.add_variable(name.name, type_info)
 
         elif name.type == "function":
-            scope_key = (get_scope_name(name.parent()), name.name, name.line)
+            scope_key = (get_scope_name(safe_parent(name)), name.name, name.line)
             if scope_key in scope_map:
                 func_scope = scope_map[scope_key]
                 return_type_str = infer_return_type(name)
@@ -317,12 +367,17 @@ def build_scope_tree(
                     ast_fallback = _infer_return_type_from_ast_node(func_scope.ast_node)
                     return_type_str = _apply_ast_return_fallback(return_type_str, ast_fallback)
                 if return_type_str and return_type_str != "Unknown":
+                    # ponytail: only a synthesised name's import is recoverable here. `name` infers
+                    # to the function itself rather than to what it returns, so resolve_import has
+                    # nothing to read, and a concrete class returned from another module still
+                    # earns no import. Upgrade path: infer the return expression, not the def.
                     func_scope.return_type = TypeInfo(
                         type_str=return_type_str,
                         source=TypeSource.RETURN_VALUE,
                         line=(name.line - 1) if name.line is not None else 0,
                         col=name.column if name.column is not None else 0,
                         ast_node=None,
+                        import_hint=import_for_annotation(return_type_str),
                     )
 
     # Each post-loop pass checks cancel token so a cancelled request bails; <=1 runs after cancel.

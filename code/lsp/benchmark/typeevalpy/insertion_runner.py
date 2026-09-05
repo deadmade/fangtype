@@ -6,8 +6,7 @@ import ast
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from benchmark.lsp_client.factory import ClientBridge
-from benchmark.lsp_client.pool import map_over_bridges
+from benchmark.lsp_client.factory import ClientBridge, map_over_bridge
 from benchmark.lsp_client.shim import insert_all
 from benchmark.typeevalpy import official
 from benchmark.typeevalpy.fact_emitter import emit_facts, split_types
@@ -176,8 +175,8 @@ def _insert_one(bridge: ClientBridge, pair: tuple[Path, Path], _index: int) -> _
     py_path, _gt_path = pair
     source = py_path.read_text()
     uri = py_path.resolve().as_uri()
-    hints, preview = bridge.collect_sync(uri, source, did_open=False)
-    candidates = emit_facts(source, hints, preview, filename=py_path.name)
+    hints, name_facts = bridge.collect_sync(uri, source, did_open=False)
+    candidates = emit_facts(source, hints, name_facts, filename=py_path.name)
 
     try:
         _ok, modified = bridge.run_sync(insert_all(bridge.client, uri))
@@ -200,12 +199,13 @@ def run_insertion_benchmark(
     benchmark_dir: Path | None = None,
     tool_name: str = "fangtype-insertion",
     show_progress: bool = True,
-    workers: int = 1,
 ) -> InsertionScore:
     """Drive the LSP server's real insert over every file and aggregate insertion yield.
 
-    Files are sharded across ``workers`` server subprocesses; the aggregate sums are
-    order-independent, so the reported yield is identical regardless of worker count.
+    Every file goes through one server process, in input order, which is the
+    configuration the tool actually ships in. That is not a claim that the per-file yield
+    is deterministic -- two runs have been measured to infer a different candidate set on
+    some files (see ``sec:eval-threats`` in the thesis).
     """
     pairs = enumerate_pairs(benchmark_dir)
     if not pairs:
@@ -229,10 +229,9 @@ def run_insertion_benchmark(
         if show_progress and done % _PROGRESS_EVERY == 0:
             print(f"Progress: [{done}/{total}] ({done / total * 100:.1f}%)")
 
-    file_results = map_over_bridges(
+    file_results = map_over_bridge(
         pairs,
         make_bridge=lambda: ClientBridge(engine=engine),
-        workers=workers,
         fn=_insert_one,
         on_done=report,
     )

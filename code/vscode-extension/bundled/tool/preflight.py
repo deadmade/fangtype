@@ -1,9 +1,9 @@
 """Cheap dependency preflight for the Fangtype server.
 
 Run by the extension under the SAME interpreter + env as the real launch. Uses
-``importlib.util.find_spec`` (which locates a module without importing it, so heavy
-packages like mypy are never executed) to report which of the server's direct
-third-party dependencies are missing. ``fangtype`` itself ships in the VSIX, so a
+``importlib.util.find_spec`` (which locates a module without importing it, so the
+module body of a heavy package like mypy is never run) to report which of the
+server's direct third-party dependencies are missing. ``fangtype`` itself ships in the VSIX, so a
 missing name here means the interpreter's environment lacks a dependency.
 
 Output contract: print the missing top-level import names, comma-separated, to

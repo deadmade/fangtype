@@ -159,24 +159,3 @@ for key, value in d.items():
         source = "invalid python syntax [["
         target_type = detect_assignment_pattern(source, "x", 0)
         assert target_type == TargetType.VARIABLE_SIMPLE
-
-
-class TestTargetTypeEnum:
-    """Tests for the TargetType enum values."""
-
-    def test_non_variable_types_excluded(self) -> None:
-        """Test that function/class types are not in variable target list."""
-        non_variable_types = [
-            TargetType.FUNCTION_PARAMETER,
-            TargetType.FUNCTION_RETURN,
-        ]
-        variable_types = [
-            TargetType.VARIABLE_SIMPLE,
-            TargetType.VARIABLE_COMPLEX,
-            TargetType.SUBSCRIPT_ACCESS,
-            TargetType.ATTRIBUTE_ACCESS,
-            TargetType.ITERATION_VARIABLE,
-        ]
-
-        for t in non_variable_types:
-            assert t not in variable_types

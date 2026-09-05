@@ -69,7 +69,7 @@ def test_build_full_document_workspace_edit_replaces_entire_document() -> None:
 
 
 def test_build_full_document_workspace_edit_defaults_version_none() -> None:
-    """Without a version the identifier carries ``None`` (client guard skipped)."""
+    """Without a version the identifier carries ``None`` (client refuses the replace)."""
     edit = build_full_document_workspace_edit("file:///x.py", "a\n", "a\n")
     assert edit.document_changes is not None
     text_document_edit = edit.document_changes[0]

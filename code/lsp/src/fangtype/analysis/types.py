@@ -22,6 +22,10 @@ class ScopeType(Enum):
     CLASS = "class"
 
 
+# (module, name) import a concrete inferred type needs, e.g. ("decimal", "Decimal"); None if none.
+ImportHint = tuple[str, str]
+
+
 class TypeSource(Enum):
     """Source of inferred type information."""
 
@@ -42,6 +46,7 @@ class TypeInfo:
     line: int
     col: int
     ast_node: ast.AST | None = None
+    import_hint: ImportHint | None = None
 
 
 @dataclass
@@ -134,6 +139,12 @@ class ScopeTree:
 
     root: Scope
     scopes_by_id: dict[str, Scope] = field(default_factory=dict)
+
+    # True when the tree is a degraded stand-in rather than a real analysis of the
+    # module, so a caller can refuse to cache it. Jedi yielding no names for a module
+    # that plainly has definitions is a failure, not an empty file, and caching it would
+    # serve that failure back until the document is edited.
+    degraded: bool = field(default=False, compare=False, repr=False)
 
     # Lazily-built, invalidated-on-add caches; excluded from dataclass eq/repr (pure derived state).
     _line_index: list[Scope] | None = field(default=None, compare=False, repr=False)

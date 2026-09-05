@@ -75,12 +75,9 @@ async def test_inlay_hints_collects_and_returns_hints(
             self.scopes_by_id = {"root": object()}
 
     fake_inference_result = SimpleNamespace(scope_tree=FakeScopeTree())
-    validation_results = {"x": MagicMock()}
 
     workflow = MagicMock()
-    workflow.collect_and_validate_types = AsyncMock(
-        return_value=(fake_inference_result, validation_results)
-    )
+    workflow.collect_types = AsyncMock(return_value=fake_inference_result)
 
     hint = types.InlayHint(
         position=types.Position(line=0, character=0),
@@ -107,7 +104,7 @@ async def test_inlay_hints_collects_and_returns_hints(
     helper.process_usage_hints.assert_called_once()
 
     # A per-request cancel token is threaded into both inference calls; not cancelled normally.
-    cav_token = workflow.collect_and_validate_types.call_args.kwargs["cancel_token"]
+    cav_token = workflow.collect_types.call_args.kwargs["cancel_token"]
     puh_token = helper.process_usage_hints.call_args.kwargs["cancel_token"]
     assert cav_token is not None
     assert puh_token is cav_token
@@ -176,7 +173,7 @@ async def test_did_change_schedules_diagnostics(
     diagnostic_engine.schedule_diagnostics.assert_called_once_with(lsp_server, "file:///test.py")
 
 
-async def test_did_change_does_not_request_inlay_refresh(
+async def test_did_change_requests_inlay_refresh(
     lsp_server: FangtypeServer, fake_workspace: FakeWorkspace
 ) -> None:
     diagnostic_engine = MagicMock()
@@ -191,8 +188,9 @@ async def test_did_change_does_not_request_inlay_refresh(
     await lsp_server.did_change(params)
 
     diagnostic_engine.schedule_diagnostics.assert_called_once()
-    # did_change must never trigger the inlay refresh (the version bump drives a native re-pull).
-    lsp_server.workspace_inlay_hint_refresh_async.assert_not_awaited()
+    # did_change refreshes inlay hints immediately (not only after the debounced diagnostics) so an
+    # applied insert settles instantly instead of lingering until mypy finishes ~0.5s later.
+    lsp_server.workspace_inlay_hint_refresh_async.assert_awaited_once_with(None)
 
 
 async def test_did_save_runs_diagnostics(
@@ -391,33 +389,6 @@ async def test_insert_types_in_file_attribute_only_success(lsp_server: FangtypeS
     assert result["inserted_count"] == 1
 
 
-async def test_preview_inserts_success(lsp_server: FangtypeServer) -> None:
-    workflow = MagicMock()
-    workflow.preview_insertions = AsyncMock(
-        return_value={
-            "will_insert": [{"variable": "x", "type": "int", "line": 2}],
-            "total_changes": 2,
-        }
-    )
-    lsp_server.workflow = workflow
-
-    ls = _fake_ls(
-        workspace=FakeWorkspace({"file:///test.py": _make_doc("file:///test.py", "x = 1\n")})
-    )
-
-    result = await lsp_server.preview_inserts(ls, ["file:///test.py"])
-
-    assert result["success"] is True
-    assert result["total_changes"] == 2
-    assert result["will_insert"]
-    assert result["will_insert"][0]["variable"] == "x"
-    assert result["will_insert"][0]["type"] == "int"
-
-    passed = workflow.preview_insertions.call_args.kwargs["cancel_token"]
-    assert passed is not None
-    assert passed.cancelled() is False
-
-
 # Task C1: on cancel, handlers cancel the per-request token; same token reads cancelled()==True.
 
 
@@ -425,7 +396,7 @@ async def test_inlay_hints_cancel_cancels_token(
     lsp_server: FangtypeServer, fake_workspace: FakeWorkspace
 ) -> None:
     workflow = MagicMock()
-    workflow.collect_and_validate_types = AsyncMock(side_effect=asyncio.CancelledError)
+    workflow.collect_types = AsyncMock(side_effect=asyncio.CancelledError)
     helper = MagicMock(spec=InlayHintHelper)
 
     lsp_server.settings = Settings()
@@ -440,7 +411,7 @@ async def test_inlay_hints_cancel_cancels_token(
     result = await lsp_server.inlay_hints(params)
 
     assert result == []
-    passed = workflow.collect_and_validate_types.call_args.kwargs["cancel_token"]
+    passed = workflow.collect_types.call_args.kwargs["cancel_token"]
     assert passed is not None
     assert passed.cancelled() is True  # handler called cancel_token.cancel()
 
@@ -457,11 +428,6 @@ async def test_inlay_hints_cancel_cancels_token(
             "insert_all_types",
             lambda s, ls: s.insert_types_in_file(ls, ["file:///test.py"]),
             id="insert_types_in_file",
-        ),
-        pytest.param(
-            "preview_insertions",
-            lambda s, ls: s.preview_inserts(ls, ["file:///test.py"]),
-            id="preview_inserts",
         ),
     ],
 )
@@ -480,6 +446,46 @@ async def test_command_handler_cancel_cancels_token(
 
     assert result["success"] is False
     passed = getattr(workflow, workflow_attr).call_args.kwargs["cancel_token"]
+    assert passed is not None
+    assert passed.cancelled() is True
+
+
+async def test_code_actions_forwards_a_cancel_token(lsp_server: FangtypeServer) -> None:
+    """S6.5: code_actions must build a per-request cancel token and forward it to the helper."""
+    helper = MagicMock()
+    helper.get_insert_type_actions = AsyncMock(return_value=[])
+    lsp_server.code_action_helper = helper
+
+    params = types.CodeActionParams(
+        text_document=types.TextDocumentIdentifier(uri="file:///test.py"),
+        range=types.Range(start=types.Position(line=0, character=0), end=types.Position(0, 1)),
+        context=types.CodeActionContext(diagnostics=[]),
+    )
+
+    result = await lsp_server.code_actions(params)
+
+    assert result == []
+    passed = helper.get_insert_type_actions.call_args.kwargs["cancel_token"]
+    assert passed is not None
+    assert passed.cancelled() is False
+
+
+async def test_code_actions_cancel_cancels_token(lsp_server: FangtypeServer) -> None:
+    """S6.5: on cancel, code_actions cancels the same token it handed to the helper."""
+    helper = MagicMock()
+    helper.get_insert_type_actions = AsyncMock(side_effect=asyncio.CancelledError)
+    lsp_server.code_action_helper = helper
+
+    params = types.CodeActionParams(
+        text_document=types.TextDocumentIdentifier(uri="file:///test.py"),
+        range=types.Range(start=types.Position(line=0, character=0), end=types.Position(0, 1)),
+        context=types.CodeActionContext(diagnostics=[]),
+    )
+
+    result = await lsp_server.code_actions(params)
+
+    assert result == []
+    passed = helper.get_insert_type_actions.call_args.kwargs["cancel_token"]
     assert passed is not None
     assert passed.cancelled() is True
 
@@ -564,8 +570,8 @@ async def test_remove_types_in_file_reads_will_skip_directly(lsp_server: Fangtyp
 def test_preview_removals_success(lsp_server: FangtypeServer) -> None:
     # Handler routes through the workflow (backed by the real RemovalEngine), exercised end-to-end.
     workflow = MagicMock()
-    workflow.preview_removals.side_effect = lambda source, variables: (
-        RemovalEngine().preview_removals(source, variables)
+    workflow.preview_removals.side_effect = lambda source, variables, include_functions=False: (
+        RemovalEngine().preview_removals(source, variables, include_functions)
     )
     lsp_server.workflow = workflow
 
@@ -577,7 +583,26 @@ def test_preview_removals_success(lsp_server: FangtypeServer) -> None:
 
     assert result["success"] is True
     assert result["total_changes"] == 1
-    workflow.preview_removals.assert_called_once_with("x: int = 1\n", ["x"])
+    workflow.preview_removals.assert_called_once_with("x: int = 1\n", ["x"], False)
+
+
+def test_preview_removals_forwards_include_functions(lsp_server: FangtypeServer) -> None:
+    workflow = MagicMock()
+    workflow.preview_removals.return_value = {
+        "success": True,
+        "will_remove": [],
+        "total_changes": 0,
+        "will_skip": [],
+        "not_found": [],
+    }
+    lsp_server.workflow = workflow
+    ls = _fake_ls(
+        workspace=FakeWorkspace({"file:///test.py": _make_doc("file:///test.py", "x: int = 1\n")})
+    )
+
+    lsp_server.preview_removals(ls, ["file:///test.py", None, True])
+
+    workflow.preview_removals.assert_called_once_with("x: int = 1\n", None, True)
 
 
 def test_on_shutdown_calls_validator_close_directly(lsp_server: FangtypeServer) -> None:

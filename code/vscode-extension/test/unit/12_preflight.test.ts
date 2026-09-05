@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import { parsePreflight, classifyClose } from '../../src/common/preflight';
+import { needsDepsProbe } from '../../src/common/server';
 
 suite('parsePreflight', () => {
     test('exit 0 with empty output means ok', () => {
@@ -37,5 +38,17 @@ suite('classifyClose', () => {
     });
     test('signal-killed close with code null and signal null still fails open', () => {
         assert.deepStrictEqual(classifyClose('', null, null), { ok: true });
+    });
+});
+
+suite('needsDepsProbe', () => {
+    test('managed skips the probe, having just installed the deps itself', () => {
+        assert.strictEqual(needsDepsProbe('managed'), false);
+    });
+    test('fromEnvironment probes', () => {
+        assert.strictEqual(needsDepsProbe('fromEnvironment'), true);
+    });
+    test('useBundled probes too: nox vendors fangtype --no-deps, so no native dep ships', () => {
+        assert.strictEqual(needsDepsProbe('useBundled'), true);
     });
 });

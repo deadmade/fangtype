@@ -11,6 +11,45 @@ _CALLABLE_SIGNATURE_PATTERN = re.compile(
 _CALLABLE_CALL_PATTERN = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\([^)]*\)$")
 
 
+# Type names this module writes itself rather than reading off an inferred object. Nothing in
+# the inference can resolve their import, because they name no symbol the analysed file refers
+# to, so the import they need is stated here. Both are spelled from collections.abc rather than
+# typing, which is deprecated for them since 3.9.
+_SYNTHESISED_TYPE_IMPORTS: dict[str, tuple[str, str]] = {
+    "Callable": ("collections.abc", "Callable"),
+    "Generator": ("collections.abc", "Generator"),
+}
+
+# Jedi reports a function-valued or generator-valued binding by its runtime class, so a dict of
+# functions comes back as `dict[str, FunctionType]`. That spelling names `types.FunctionType`,
+# which the analysed file does not import, and it is a valid expression so the validity gate
+# passes it straight through to mypy as an undefined name. Rewriting to the collections.abc
+# spelling gives it an importable name, and it is also the assignable one: `types.FunctionType`
+# is a nominal class that typeshed does not make a supertype of every `Callable`, so annotating
+# with it would reject values the binding really holds.
+_RUNTIME_CLASS_SPELLINGS = {
+    "FunctionType": "Callable",
+    "GeneratorType": "Generator",
+}
+
+
+def annotation_mentions_name(annotation: str, name: str) -> bool:
+    """Whether an annotation refers to a bare name, as a whole identifier rather than a substring.
+
+    ``Decimal`` is mentioned by ``Decimal``, by ``Decimal | None`` and by ``list[Decimal]``, and
+    is not mentioned by ``DecimalLike``.
+    """
+    return re.search(rf"\b{re.escape(name)}\b", annotation) is not None
+
+
+def import_for_annotation(annotation: str) -> tuple[str, str] | None:
+    """The import a synthesised type name in this annotation needs, or None when it needs none."""
+    for name, hint in _SYNTHESISED_TYPE_IMPORTS.items():
+        if annotation_mentions_name(annotation, name):
+            return hint
+    return None
+
+
 def _is_valid_type_expression(type_str: str) -> bool:
     """Check if a type string can be parsed as a Python expression."""
     try:
@@ -196,6 +235,7 @@ def _normalize_type_name_core(type_str: str) -> str:
             "Set": "set",
             "Tuple": "tuple",
             "FrozenSet": "frozenset",
+            **_RUNTIME_CLASS_SPELLINGS,
         }
         new_base = base_mapping.get(base_type, base_type)
 
@@ -220,6 +260,7 @@ def _normalize_type_name_core(type_str: str) -> str:
         "Tuple": "tuple",
         "FrozenSet": "frozenset",
         "callable": "Callable",
+        **_RUNTIME_CLASS_SPELLINGS,
     }
 
     return simple_mapping.get(type_str, type_str)

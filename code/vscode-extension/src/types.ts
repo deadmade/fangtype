@@ -14,7 +14,7 @@ export interface LspVersionedTextDocumentEdit {
 export interface LspWorkspaceEdit {
     // Legacy unversioned form; kept for back-compat.
     changes?: Record<string, LspTextEdit[]>;
-    // Versioned form: each edit carries its version, so a stale full-document replace is rejected.
+    // Versioned form: a number is checked pre-apply; null refuses a whole-file replace.
     documentChanges?: LspVersionedTextDocumentEdit[];
 }
 

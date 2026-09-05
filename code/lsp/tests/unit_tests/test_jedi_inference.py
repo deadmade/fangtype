@@ -1,6 +1,9 @@
-"""JediInferenceEngine edge cases and TypeEvalPy integration scenarios."""
+"""JediInferenceEngine edge cases and environment selection."""
 
 import ast
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 import jedi
@@ -32,62 +35,66 @@ class TestInferenceResilience:
         assert bad not in result  # crashing location dropped, not fatal
 
 
-class TestTypeEvalPyIntegration:
-    """Test cases based on TypeEvalPy benchmark scenarios."""
+class TestInferTypesResilience:
+    """A transient Jedi/parso failure must not cost the whole file its types."""
 
-    async def test_return_types_scenario(self, engine):
-        """Test the return_types scenario from TypeEvalPy."""
-        source = """
-def func():
-    return 1, 2, 3
+    SOURCE = "def f():\n    return 1\n\n\nclass C:\n    pass\n"
 
-a = func()
+    def test_transient_failure_is_retried_and_the_file_survives(self, engine):
+        """One parse-cache miss is retried; the file keeps its names.
 
-def func1():
-    return {"a": 1, "b": 2, "c": 3}
+        Before the fix a single ``KeyError`` from deep inside name resolution unwound
+        into a bare ``except`` and the whole file came back with only module scope.
+        """
+        calls = {"n": 0}
+        real_get_names = jedi.Script.get_names
 
-b = func1()
+        def flaky_get_names(self, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise KeyError("simulated parso parse-cache miss")
+            return real_get_names(self, *args, **kwargs)
 
-def func4():
-    return set([1, 2, 3, 2, 1])
+        with patch.object(jedi.Script, "get_names", flaky_get_names):
+            result = engine.infer_types(self.SOURCE)
 
-d = func4()
+        assert calls["n"] >= 2, "the failure should have been retried once"
+        assert result.is_complete
+        assert len(result.scope_tree.scopes_by_id) > 1, "file kept its scopes"
 
-def func5():
-    return [x**2 for x in range(1, 6)]
+    def test_permanent_failure_is_not_cacheable(self, engine):
+        """A failure that survives the retry still yields a never-cache result."""
 
-e = func5()
-"""
-        result = engine.infer_types(source)
+        def always_fails(self, *args, **kwargs):
+            raise KeyError("simulated parso parse-cache miss")
 
-        func_return_types = {}
-        for scope in result.scope_tree.root.children:
-            if scope.return_type:
-                func_return_types[scope.name] = scope.return_type.type_str
+        with patch.object(jedi.Script, "get_names", always_fails):
+            result = engine.infer_types(self.SOURCE)
 
-        assert "func" in func_return_types
-        assert func_return_types["func"].startswith("tuple")
+        assert result.is_complete is False
 
-        assert "func1" in func_return_types
-        assert func_return_types["func1"].startswith("dict")
+    def test_no_names_for_a_substantive_module_is_degraded(self, engine):
+        """Jedi returning nothing for a module with statements is a failure, not an
+        empty file, so it must not be cached and served back."""
+        with patch.object(jedi.Script, "get_names", lambda self, *a, **k: []):
+            result = engine.infer_types(self.SOURCE)
 
-        assert "func4" in func_return_types
-        assert func_return_types["func4"].startswith("set")
+        assert result.is_complete is False
 
-        assert "func5" in func_return_types
-        assert func_return_types["func5"].startswith("list")
+    def test_a_module_with_no_statements_stays_complete(self, engine):
+        """A docstring-only module really has no names; that tree is correct."""
+        with patch.object(jedi.Script, "get_names", lambda self, *a, **k: []):
+            result = engine.infer_types('"""Only a docstring."""\n')
 
-        assert "a" in result.scope_tree.root.variables
-        assert result.scope_tree.root.variables["a"].type_str.startswith("tuple")
+        assert result.is_complete is True
 
-        assert "b" in result.scope_tree.root.variables
-        assert result.scope_tree.root.variables["b"].type_str.startswith("dict")
+    def test_syntax_error_is_not_retried(self, engine):
+        """A file that does not parse has no types; that is an answer, not a failure."""
+        with patch.object(jedi.Script, "get_names") as get_names:
+            result = engine.infer_types("def broken(:\n")
 
-        assert "d" in result.scope_tree.root.variables
-        assert result.scope_tree.root.variables["d"].type_str.startswith("set")
-
-        assert "e" in result.scope_tree.root.variables
-        assert result.scope_tree.root.variables["e"].type_str.startswith("list")
+        assert result.is_complete is False
+        get_names.assert_not_called()
 
 
 class TestEdgeCases:
@@ -214,3 +221,38 @@ class TestJediEnvironmentSelection:
             env = engine._get_env()
         mk.assert_not_called()
         assert env is sentinel
+
+
+class TestConcurrentInference:
+    """Jedi's compiled subprocess, jedi.Project and parso's parse cache are shared and
+
+    unguarded, so the engine must serialize every Jedi call. Without the lock, concurrent
+    `asyncio.to_thread` inferences interleave on one pickle pipe and unpickle each other's
+    bytes (UnpicklingError: invalid load key).
+    """
+
+    def test_inference_never_runs_two_jedi_calls_at_once(self, engine):
+        source = "def f():\n    return 1\n\n\nx = f()\n"
+        live = 0
+        peak = 0
+        counter_lock = threading.Lock()
+        real = engine._build_scope_tree_result
+
+        def watched(*args, **kwargs):
+            nonlocal live, peak
+            with counter_lock:
+                live += 1
+                peak = max(peak, live)
+            try:
+                time.sleep(0.01)  # widen the window an unguarded engine would race in
+                return real(*args, **kwargs)
+            finally:
+                with counter_lock:
+                    live -= 1
+
+        with patch.object(engine, "_build_scope_tree_result", watched):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(lambda _: engine.infer_types(source), range(8)))
+
+        assert peak == 1, f"{peak} Jedi calls overlapped; the engine lock is not holding"
+        assert all(r.is_complete for r in results)

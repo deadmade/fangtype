@@ -165,3 +165,48 @@ class TestGetAttributeInsertionsSelfKeyRegression:
         source = "class C:\n    def __init__(self, point):\n        point.x: int = 5\n"
         result = engine.infer_types(source)
         assert result.get_attribute_insertions() == {}
+
+
+class TestInlineAnnotationDetection:
+    """The already-annotated check reads the parsed tree, never the raw source line."""
+
+    def test_lambda_parameter_colon_does_not_suppress_the_binding(
+        self, engine: JediInferenceEngine
+    ) -> None:
+        """The `" x:"` of the lambda's own parameter used to read as an annotation on `x`.
+
+        The editor showed a Callable ghost hint that accept-all then refused to write.
+        """
+        result = engine.infer_types("x = lambda x: x + 1\n")
+        assert (0, "x") in result.get_variable_insertions()
+
+    def test_lambda_with_a_differently_named_parameter_is_unaffected(
+        self, engine: JediInferenceEngine
+    ) -> None:
+        """Guard the neighbouring shape that always worked."""
+        result = engine.infer_types("y = lambda x: x + 1\n")
+        assert (0, "y") in result.get_variable_insertions()
+
+    def test_annotated_variable_is_suppressed(self, engine: JediInferenceEngine) -> None:
+        """The behaviour the substring test was there for, previously untested."""
+        result = engine.infer_types("x: int = 5\n")
+        assert result.get_variable_insertions() == {}
+
+    def test_annotation_in_a_trailing_comment_does_not_suppress(
+        self, engine: JediInferenceEngine
+    ) -> None:
+        result = engine.infer_types("x = 5  # x: int\n")
+        assert (0, "x") in result.get_variable_insertions()
+
+    def test_annotation_inside_a_string_does_not_suppress(
+        self, engine: JediInferenceEngine
+    ) -> None:
+        result = engine.infer_types('x = "x: int"\n')
+        assert (0, "x") in result.get_variable_insertions()
+
+    def test_annotation_on_another_line_does_not_suppress(
+        self, engine: JediInferenceEngine
+    ) -> None:
+        """The check is line-precise, so a same-named annotation elsewhere must not reach."""
+        result = engine.infer_types("def f():\n    x: int = 1\n\nx = 2\n")
+        assert (3, "x") in result.get_variable_insertions()

@@ -2,11 +2,13 @@
 
 import asyncio
 import difflib
+from collections.abc import Mapping
 
 from injector import inject
 
-from fangtype.analysis import ScopeType
+from fangtype.analysis import ForwardRefContext, build_forward_ref_context
 from fangtype.analysis.name_collector import NameCollector, NameLocation
+from fangtype.analysis.types import ImportHint
 from fangtype.cancellation import CancellationToken
 from fangtype.inference import InferenceResult
 from fangtype.inference.inference_result import FunctionInsertionInfo
@@ -124,6 +126,62 @@ class TypeAnnotationWorkflow:
         else:
             return source, 0, drop_reasons, f"Insertion failed: {result.error_message}"
 
+    async def insert_with_assignability_gate(
+        self, targets: list[InsertionTarget], source: str
+    ) -> InsertionResult:
+        """Public entry to the gate, for the code-action path which builds its own target.
+
+        The private method keeps its name because the evaluation harvest scripts import and
+        monkeypatch it there.
+        """
+        return await self._insert_with_assignability_gate(targets, source)
+
+    async def prepare_targets_for_line(
+        self,
+        source: str,
+        file_path: str | None,
+        line_0_based: int,
+        cancel_token: CancellationToken | None = None,
+        uri: str | None = None,
+        version: int | None = None,
+    ) -> list[InsertionTarget]:
+        """Every InsertionTarget the file yields whose insert lands on `line_0_based`.
+
+        The code-action path needs the same targets the file-wide insert builds, restricted to one
+        line, so the lightbulb reaches every kind the engine can write rather than the simple
+        assignments a regex could recognise.
+
+        `per_binding=True` surfaces each binding of a repeated name instead of only the most recent
+        one, which is what lets the line restriction pick the clicked occurrence. Parameters and
+        returns both carry their `def` line, so a click on a signature collects the whole of it.
+
+        The line is applied twice, to the inference keys and then to the built targets, because the
+        two can disagree. Inference surfaces a self-attribute under its bare name as a variable as
+        well, `find_assignment_target` cannot place that bare name in source that says `self.value`,
+        and `find_variable_line` answers 1 when it finds no candidate -- so without the first
+        restriction every unplaceable name in the file would pile onto line 1. The second keeps the
+        offered edit about the line that was actually clicked.
+        """
+        (
+            targets,
+            _var_count,
+            _func_count,
+            early_message,
+            _reasons,
+        ) = await self._prepare_insertion_targets(
+            source,
+            file_path,
+            cancel_token=cancel_token,
+            uri=uri,
+            version=version,
+            only_line=line_0_based,
+            per_binding=True,
+        )
+        if early_message is not None:
+            return []
+        line_1_based = line_0_based + 1
+        return [t for t in targets if t.location.line == line_1_based]
+
     async def _insert_with_assignability_gate(
         self, targets: list[InsertionTarget], source: str
     ) -> InsertionResult:
@@ -137,11 +195,9 @@ class TypeAnnotationWorkflow:
         trial). Each iteration that drops shrinks the survivor set strictly, so the loop converges
         in at most `len(targets)` iterations; the final clean validation is the terminating pass.
 
-        This is the value-fit safety net the bare-annotation `validate_bulk` pre-pass cannot give:
-        it checks each type against its real RHS in its real scope. Gated behind `mypy_enabled`
-        (default True), independent of `mypy_inference_validation_enabled` (which governs the inlay
-        path only). ponytail: one extra full-file mypy run per surviving drop-round — insert-path
-        only, never per-keystroke.
+        It checks each type against its real right-hand side in its real scope, which is what a
+        bare declaration cannot do. Gated behind `mypy_enabled` (default True). Cost is one extra
+        full-file mypy run per surviving drop-round.
         """
         result = self._insertion_engine.insert(targets, source)
         if not self._settings.mypy_enabled or not result.success or result.inserted_count == 0:
@@ -167,43 +223,6 @@ class TypeAnnotationWorkflow:
 
         # Unreachable: survivors strictly shrink each pass, so the loop always returns above.
         raise AssertionError("assignability gate failed to converge")
-
-    async def preview_insertions(
-        self,
-        source: str,
-        file_path: str | None = None,
-        cancel_token: CancellationToken | None = None,
-        uri: str | None = None,
-        version: int | None = None,
-    ) -> dict[str, object]:
-        """Preview insertions as client-ready data: {"will_insert": [...], "total_changes": int}."""
-        targets, _, _, early_msg, _ = await self._prepare_insertion_targets(
-            source, file_path, cancel_token=cancel_token, uri=uri, version=version, per_binding=True
-        )
-
-        if early_msg is not None or not targets:
-            return {"will_insert": [], "total_changes": 0}
-
-        engine_preview = self._insertion_engine.preview_insertions(targets, source)
-        total = engine_preview.get("total_plans", 0)
-
-        # preview_insertions returns a heterogeneous dict (or {"error": ...}); narrow first.
-        plan_details = engine_preview.get("plan_details", [])
-        will_insert: list[dict[str, object]] = []
-        if isinstance(plan_details, list):
-            for plan in plan_details:
-                if not isinstance(plan, dict):
-                    continue
-                variable = plan.get("target") or plan.get("variable")
-                type_str = plan.get("type")
-                if variable is None or type_str is None:
-                    continue
-                entry: dict[str, object] = {"variable": variable, "type": type_str}
-                if "line" in plan:
-                    entry["line"] = plan["line"]
-                will_insert.append(entry)
-
-        return {"will_insert": will_insert, "total_changes": total}
 
     async def annotate_at_position(
         self,
@@ -303,34 +322,24 @@ class TypeAnnotationWorkflow:
         return modified_source, result_info
 
     def preview_removals(
-        self, source: str, variables: list[str] | None = None
+        self,
+        source: str,
+        variables: list[str] | None = None,
+        include_functions: bool = False,
     ) -> dict[str, object]:
         """Preview which annotations would be removed (sync RemovalEngine summary)."""
-        return self._removal_engine.preview_removals(source, variables)
+        return self._removal_engine.preview_removals(source, variables, include_functions)
 
-    async def collect_and_validate_types(
+    async def collect_types(
         self,
         source: str,
         file_path: str | None,
         cancel_token: CancellationToken | None = None,
         uri: str | None = None,
         version: int | None = None,
-    ) -> tuple[InferenceResult, dict[str, TypeValidationResult] | None]:
-        """Infer, collect all-scope types, and validate (inlay path); None if mypy off."""
-        # 1. Infer types (served from the DocumentCache when the document is unchanged).
-        inference_result = await self._infer_cached(source, file_path, uri, version, cancel_token)
-
-        # 2. Collect every inferred type from all scopes.
-        all_types = self._collect_types_from_scopes(inference_result)
-
-        # 3. Validate (mypy guard — also inlined in _prepare_insertion_targets; keep in sync).
-        validated_types = (
-            await self._type_validator.validate_bulk(all_types, source)
-            if self._settings.mypy_inference_validation_enabled
-            else None
-        )
-
-        return inference_result, validated_types
+    ) -> InferenceResult:
+        """Infer every type for the inlay path, served from the DocumentCache when unchanged."""
+        return await self._infer_cached(source, file_path, uri, version, cancel_token)
 
     async def _prepare_insertion_targets(
         self,
@@ -341,6 +350,7 @@ class TypeAnnotationWorkflow:
         version: int | None = None,
         *,
         only: tuple[str, int] | None = None,
+        only_line: int | None = None,
         per_binding: bool = False,
     ) -> tuple[list[InsertionTarget], int, int, str | None, dict[str, int]]:
         """Infer+validate+build InsertionTargets; `only` scopes to cursor, `per_binding` all.
@@ -355,8 +365,12 @@ class TypeAnnotationWorkflow:
         # 2. Collect the inferred function/attribute candidates (shared by all paths).
         function_insertions = inference_result.get_function_insertions()
         attribute_insertions = inference_result.get_attribute_insertions()
+        # Per-(line0, name) imports for variables; keyed like get_variable_insertions.
+        import_hints = inference_result.get_import_hints()
+        # Same for signatures, keyed (line0, func_name, param_name) with "return" for the return.
+        function_import_hints = inference_result.get_function_import_hints()
 
-        # 2a. Variables: full-file insert picks most-recent valid binding/name; preview/cursor: rep.
+        # 2a. Variables: full-file insert picks most-recent valid binding/name; action/cursor: rep.
         best_valid = only is None and not per_binding
         variable_insertions: dict[tuple[int, str], str] = {}
         variable_candidates: dict[tuple[str, str], list[tuple[int, str]]] = {}
@@ -371,34 +385,26 @@ class TypeAnnotationWorkflow:
                 only, variable_insertions, function_insertions, attribute_insertions
             )
 
+        # 2c. Narrow to one line (code-action only). Meaningful only alongside `only`/`per_binding`,
+        # since `best_valid` carries its variables in `variable_candidates` instead.
+        if only_line is not None:
+            variable_insertions, function_insertions, attribute_insertions = _restrict_to_line(
+                only_line, variable_insertions, function_insertions, attribute_insertions
+            )
+
         inferred_vars: object = variable_candidates if best_valid else variable_insertions
         if not (inferred_vars or function_insertions or attribute_insertions):
             return [], 0, 0, "No types to insert (no variables, functions, or attributes found)", {}
 
-        # 3. Validate (guard inlined in collect_and_validate_types too); None = trust every type.
+        # 3. Variables: the full-file insert takes the most recent binding per name. Every
+        # candidate is trusted here; the assignability gate is what judges them against the file.
         validated_vars: dict[tuple[int, str], TypeValidationResult] | None
         drop_reasons: dict[str, int] = {}
         if best_valid:
-            validated_vars = await self._select_best_valid_variables(variable_candidates, source)
+            validated_vars = _select_most_recent_variables(variable_candidates)
             drop_reasons = _bucket_variable_drop_reasons(variable_candidates, validated_vars)
         else:
-            validated_vars = (
-                await self._type_validator.validate_bulk(variable_insertions, source)
-                if self._settings.mypy_inference_validation_enabled
-                else None
-            )
-            # validate_bulk returns every input; drop mypy-rejected so only valid types build.
-            if validated_vars is not None:
-                validated_vars = {k: v for k, v in validated_vars.items() if v.is_valid}
-
-        # Attrs/funcs validated the same (mypy-only), per-annotation: a func keeps valid parts.
-        if self._settings.mypy_inference_validation_enabled:
-            attribute_insertions = await self._validate_attribute_insertions(
-                attribute_insertions, source
-            )
-            function_insertions = await self._validate_function_insertions(
-                function_insertions, source
-            )
+            validated_vars = None
 
         have_vars = variable_insertions if validated_vars is None else validated_vars
         if not (have_vars or function_insertions or attribute_insertions):
@@ -406,91 +412,15 @@ class TypeAnnotationWorkflow:
 
         # 4. Build the InsertionTarget objects for the valid insertions.
         targets = self._build_targets(
-            validated_vars, variable_insertions, function_insertions, attribute_insertions, source
+            validated_vars,
+            variable_insertions,
+            function_insertions,
+            attribute_insertions,
+            source,
+            import_hints,
+            function_import_hints,
         )
         return targets, len(have_vars), len(function_insertions), None, drop_reasons
-
-    async def _validate_attribute_insertions(
-        self, attribute_insertions: dict[tuple[int, str], str], source: str
-    ) -> dict[tuple[int, str], str]:
-        """Drop attribute insertions whose inferred type mypy rejects (empty in → empty out)."""
-        if not attribute_insertions:
-            return attribute_insertions
-        validated = await self._type_validator.validate_bulk(attribute_insertions, source)
-        return {k: attribute_insertions[k] for k, result in validated.items() if result.is_valid}
-
-    async def _validate_function_insertions(
-        self,
-        function_insertions: dict[tuple[int, str], FunctionInsertionInfo],
-        source: str,
-    ) -> dict[tuple[int, str], FunctionInsertionInfo]:
-        """Drop mypy-rejected function annotations per-annotation; func kept if any part valid."""
-        if not function_insertions:
-            return function_insertions
-
-        # Flatten to bare type strings; "return" can't collide (keyword), (line, name) is unique.
-        flat: dict[tuple[int, str, str], str] = {}
-        for (line, fname), info in function_insertions.items():
-            for param_name, param_type in info["params"].items():
-                flat[(line, fname, param_name)] = param_type
-            if info["return_type"] is not None:
-                flat[(line, fname, "return")] = info["return_type"]
-
-        validated = await self._type_validator.validate_bulk(flat, source)
-        if not validated:
-            return {}
-
-        result: dict[tuple[int, str], FunctionInsertionInfo] = {}
-        for (line, fname), info in function_insertions.items():
-            valid_params = {
-                param_name: param_type
-                for param_name, param_type in info["params"].items()
-                if validated[(line, fname, param_name)].is_valid
-            }
-            return_type = info["return_type"]
-            valid_return = (
-                return_type
-                if return_type is not None and validated[(line, fname, "return")].is_valid
-                else None
-            )
-            if valid_params or valid_return is not None:
-                result[(line, fname)] = {
-                    "name": info["name"],
-                    "params": valid_params,
-                    "return_type": valid_return,
-                }
-        return result
-
-    async def _select_best_valid_variables(
-        self,
-        candidates: dict[tuple[str, str], list[tuple[int, str]]],
-        source: str,
-    ) -> dict[tuple[int, str], TypeValidationResult]:
-        """Pick most-recent mypy-valid binding per name; returns {(line0, name): result}."""
-        if not candidates:
-            return {}
-
-        flat: dict[tuple[int, str], str] = {}
-        for (_scope_id, name), bindings in candidates.items():
-            for line0, type_str in bindings:
-                flat[(line0, name)] = type_str
-
-        if self._settings.mypy_inference_validation_enabled:
-            validated = await self._type_validator.validate_bulk(flat, source)
-        else:
-            validated = {
-                key: TypeValidationResult(type_str=type_str, is_valid=True)
-                for key, type_str in flat.items()
-            }
-
-        selected: dict[tuple[int, str], TypeValidationResult] = {}
-        for (_scope_id, name), bindings in candidates.items():
-            for line0, _type_str in bindings:  # most-recent-first
-                result = validated.get((line0, name))
-                if result is not None and result.is_valid:
-                    selected[(line0, name)] = result
-                    break
-        return selected
 
     def _build_targets(
         self,
@@ -499,10 +429,15 @@ class TypeAnnotationWorkflow:
         function_insertions: dict[tuple[int, str], FunctionInsertionInfo],
         attribute_insertions: dict[tuple[int, str], str],
         source: str,
+        import_hints: dict[tuple[int, str], ImportHint] | None = None,
+        function_import_hints: Mapping[tuple[int, str, str], ImportHint] | None = None,
     ) -> list[InsertionTarget]:
         """Build InsertionTargets from validated vars (raw insertions when mypy off) + func/attr."""
         targets: list[InsertionTarget] = []
         source_index = build_source_index(source)
+        # Built once per request: an annotation naming a class that is not bound yet where it
+        # is written raises NameError on import before 3.14, and mypy cannot see it.
+        forward_refs = build_forward_ref_context(source)
 
         # Variable targets. Keys are (line_0_based, name); resolve each to 1-based line + type.
         for key, value in (
@@ -531,31 +466,61 @@ class TypeAnnotationWorkflow:
             targets.append(
                 create_variable_target(
                     var_name,
-                    type_str,
+                    forward_refs.quote_if_needed(type_str, line_1_based),
                     line_1_based,
                     target_type=target_type,
+                    import_hint=(import_hints or {}).get(key),
                 )
             )
 
         # Function targets.
         for (line_0_based, _func_name), sig_info in function_insertions.items():
-            targets.extend(self._create_function_targets(sig_info, line_0_based + 1))
+            targets.extend(
+                self._create_function_targets(
+                    sig_info,
+                    line_0_based + 1,
+                    forward_refs,
+                    function_import_hints,
+                    line_0_based,
+                )
+            )
 
         # Attribute targets. Non-self stored dotted, self bare; _attr_key_full_name re-dots first.
         for (line_1_based, full_attr_name), type_str in attribute_insertions.items():
             obj_name, attr_name = _attr_key_full_name(full_attr_name).split(".", 1)
             targets.append(
-                self._create_attribute_target(obj_name, attr_name, type_str, line_1_based)
+                self._create_attribute_target(
+                    obj_name,
+                    attr_name,
+                    forward_refs.quote_if_needed(type_str, line_1_based),
+                    line_1_based,
+                )
             )
 
         return targets
 
     def _create_function_targets(
-        self, func_info: FunctionInsertionInfo, line: int
+        self,
+        func_info: FunctionInsertionInfo,
+        line: int,
+        forward_refs: ForwardRefContext,
+        import_hints: Mapping[tuple[int, str, str], ImportHint] | None = None,
+        line_0_based: int | None = None,
     ) -> list[InsertionTarget]:
-        """Create InsertionTarget objects for function parameter and return annotations."""
+        """Create InsertionTarget objects for function parameter and return annotations.
+
+        A signature is evaluated where the ``def`` stands, so both kinds are quoted against
+        that line rather than against wherever the name they carry is defined.
+
+        ``import_hints`` is keyed on the 0-based def line, which is why it is passed alongside
+        the 1-based ``line`` the targets carry. A signature annotation needs its import as much
+        as a variable one does, and until it carried one a synthesised ``Callable`` reached
+        mypy as an undefined name and the gate dropped it.
+        """
         targets = []
         func_name = func_info["name"]
+        hints = import_hints or {}
+        hint_line = line - 1 if line_0_based is None else line_0_based
 
         # Add parameter annotations
         params = func_info["params"]
@@ -563,8 +528,9 @@ class TypeAnnotationWorkflow:
             target = InsertionTarget(
                 target_type=TargetType.FUNCTION_PARAMETER,
                 location=CodeLocation(line=line, column=0),
-                type_annotation=param_type,
+                type_annotation=forward_refs.quote_if_needed(param_type, line),
                 name=param_name,
+                import_hint=hints.get((hint_line, func_name, param_name)),
             )
             targets.append(target)
 
@@ -574,8 +540,9 @@ class TypeAnnotationWorkflow:
             target = InsertionTarget(
                 target_type=TargetType.FUNCTION_RETURN,
                 location=CodeLocation(line=line, column=0),
-                type_annotation=return_type,
+                type_annotation=forward_refs.quote_if_needed(return_type, line),
                 name=func_name,
+                import_hint=hints.get((hint_line, func_name, "return")),
             )
             targets.append(target)
 
@@ -627,33 +594,27 @@ class TypeAnnotationWorkflow:
             "error_message": message,
         }
 
-    def _collect_types_from_scopes(self, inference_result: InferenceResult) -> dict[str, str]:
-        """Collect every non-Unknown type from all scopes, keyed {scope_id}.{cat}.{name} (sync)."""
-        all_types: dict[str, str] = {}
-        for scope_id, scope_obj in inference_result.scope_tree.scopes_by_id.items():
-            # Collect local variables
-            for var_name, type_info in scope_obj.variables.items():
-                if type_info.type_str != "Unknown":
-                    key = f"{scope_id}.var.{var_name}"
-                    all_types[key] = type_info.type_str
-
-            # Collect function parameters and return types
-            if scope_obj.scope_type == ScopeType.FUNCTION:
-                for param_name, type_info in scope_obj.parameters.items():
-                    if type_info.type_str != "Unknown":
-                        key = f"{scope_id}.param.{param_name}"
-                        all_types[key] = type_info.type_str
-
-                if scope_obj.return_type and scope_obj.return_type.type_str != "Unknown":
-                    key = f"{scope_id}.return"
-                    all_types[key] = scope_obj.return_type.type_str
-
-        return all_types
-
 
 def _attr_key_full_name(key_name: str) -> str:
     """Self attrs are stored bare ('width'); non-self dotted ('obj.x')."""
     return key_name if "." in key_name else f"self.{key_name}"
+
+
+def _select_most_recent_variables(
+    candidates: dict[tuple[str, str], list[tuple[int, str]]],
+) -> dict[tuple[int, str], TypeValidationResult]:
+    """Take the most recent binding per name; returns {(line0, name): result}.
+
+    `candidates` lists each name's bindings most-recent-first, so the first entry wins. Every
+    candidate is reported valid here because nothing has been checked yet -- the assignability
+    gate is the only thing that judges a type, and it does so against the rendered file.
+    """
+    selected: dict[tuple[int, str], TypeValidationResult] = {}
+    for (_scope_id, name), bindings in candidates.items():
+        for line0, type_str in bindings:  # most-recent-first
+            selected[(line0, name)] = TypeValidationResult(type_str=type_str, is_valid=True)
+            break
+    return selected
 
 
 def _bucket_variable_drop_reasons(
@@ -673,10 +634,16 @@ def _bucket_variable_drop_reasons(
     return reasons
 
 
-# mypy error codes that mean "this annotation does not fit its value/use" — the ones the
+# mypy error codes that mean "the annotation just written does not hold" — the ones the
 # assignability gate acts on. `assignment` covers variables/attributes (`x: int = "s"`),
-# `arg-type` covers parameters at their call sites.
-_INCOMPATIBLE_CODES = frozenset({"assignment", "arg-type"})
+# `arg-type` covers parameters at their call sites, and `return-value` covers a signature's
+# return against what the body yields. The last two are about a standalone declaration rather
+# than a fit: `no-redef` fires when the declaration lands after another binding of the name,
+# and `name-defined` when the annotation names something the file never imports — which on
+# 3.12 and 3.13 is not a failed check but a NameError at import.
+_INCOMPATIBLE_CODES = frozenset(
+    {"assignment", "arg-type", "return-value", "no-redef", "name-defined"}
+)
 
 
 def _flagged_target_lines(
@@ -690,6 +657,22 @@ def _flagged_target_lines(
     mypy reports against the MODIFIED file's line numbers; we map each error line back to its
     original line via difflib before intersecting with the targets' lines. Only lines that host
     a target are returned, so a collateral error elsewhere never drops an unrelated annotation.
+
+    KNOWN LIMITATION -- the gate drops by LINE, not by target. A `def` line hosting three
+    parameter targets and a return target is one line, so a diagnostic naming any one of them
+    drops all four. `_insert_with_assignability_gate` then re-inserts the survivors, and the
+    three correct annotations are gone with the wrong one. Since 0.5.13 the code action offers
+    a whole signature as one action, which is where this is visible to a developer: one bad
+    parameter costs the line its lightbulb entirely.
+
+    TO FIX, and it is not a local change. This function would have to return the flagged
+    TARGETS rather than their lines, which means deciding which target on a shared line a
+    diagnostic belongs to. mypy names a column, so `arg-type` on a parameter is separable from
+    `return-value` on the return, but two parameters flagged on the same `def` still need the
+    column mapped back through `_map_modified_to_original`, which today maps lines only. The
+    caller at `_insert_with_assignability_gate` filters `survivors` on `t.location.line` and
+    would filter on target identity instead. Both insert requests share this path, so the
+    evaluation numbers move with it -- see the eval-rerun note before touching it.
     """
     target_lines = {t.location.line for t in targets}
     error_mod_lines = {
@@ -710,9 +693,11 @@ def _flagged_target_lines(
 def _map_modified_to_original(source: str, modified: str) -> dict[int, int]:
     """Map each 1-based modified-file line to the 1-based original line it derives from.
 
-    Built from difflib opcodes: `equal`/`replace` blocks pair lines positionally; purely inserted
-    lines (a DECLARATION annotation with no original counterpart) are omitted — no assignment error
-    lands on a bare `x: int` declaration anyway, only on the (paired) statement it precedes.
+    Built from difflib opcodes. `equal`/`replace` blocks pair lines positionally, and a purely
+    inserted line — a DECLARATION annotation, which has no original counterpart — maps to the
+    original statement it was written above, which is the line its target carries. Without that
+    the gate discards every diagnostic landing on a declaration it wrote, and `no-redef` and
+    `name-defined` land nowhere else.
     """
     orig = source.splitlines()
     mod = modified.splitlines()
@@ -729,7 +714,14 @@ def _map_modified_to_original(source: str, modified: str) -> dict[int, int]:
                 # min(k, span-1): defensive clamp for an unequal-span replace. Real insertions are
                 # IN_PLACE 1->1 or DECLARATION insert+equal, never unequal replace — it won't fire.
                 mapping[j1 + k + 1] = i1 + min(k, span - 1) + 1
-        # insert/delete: modified lines with no single original source line — intentionally skipped.
+        elif tag == "insert":
+            # i1 is where the block was spliced in, so original line i1+1 is the statement now
+            # standing below it. An insert at end-of-file has none, and maps to the last line.
+            origin = min(i1 + 1, len(orig)) if orig else 0
+            if origin:
+                for k in range(j2 - j1):
+                    mapping[j1 + k + 1] = origin
+        # delete: no modified line to map at all.
     return mapping
 
 
@@ -750,6 +742,29 @@ def _select_key_by_line(keys: list[tuple[int, str]], line_0_based: int) -> tuple
     if at_or_before:
         return max(at_or_before, key=key_line)
     return min(keys, key=key_distance)
+
+
+def _restrict_to_line(
+    line_0_based: int,
+    variable_insertions: dict[tuple[int, str], str],
+    function_insertions: dict[tuple[int, str], FunctionInsertionInfo],
+    attribute_insertions: dict[tuple[int, str], str],
+) -> tuple[
+    dict[tuple[int, str], str],
+    dict[tuple[int, str], FunctionInsertionInfo],
+    dict[tuple[int, str], str],
+]:
+    """Restrict inference's insertion dicts to what was inferred on one line.
+
+    Variable and function keys are 0-based, attribute keys 1-based, which is why the attribute
+    comparison shifts. A function's key line is its `def`, so a signature restricts as a whole.
+    """
+    line_1_based = line_0_based + 1
+    return (
+        {k: v for k, v in variable_insertions.items() if k[0] == line_0_based},
+        {k: info for k, info in function_insertions.items() if k[0] == line_0_based},
+        {k: v for k, v in attribute_insertions.items() if k[0] == line_1_based},
+    )
 
 
 def _restrict_to_target(

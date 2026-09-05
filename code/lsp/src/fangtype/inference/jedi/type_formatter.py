@@ -1,9 +1,15 @@
 """Jedi type formatting utilities: format Jedi type objects into readable type hints."""
 
 import logging
+from pathlib import Path
 from typing import Any
 
-from fangtype.inference.type_utils import normalize_type_name
+from fangtype.analysis.types import ImportHint
+from fangtype.inference.type_utils import (
+    annotation_mentions_name,
+    import_for_annotation,
+    normalize_type_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +70,72 @@ def format_jedi_type(jedi_type: Any) -> str:
         logger.debug(f"Error formatting Jedi type: {e}")
 
     return "Unknown"
+
+
+def _same_module(module_path: Any, own_module_path: Path | str | None) -> bool:
+    """True when a symbol's defining file is the file being annotated.
+
+    Compared by path rather than by module name, because the name a symbol carries depends
+    on how the script was opened. A pathless script makes Jedi call the module ``__main__``
+    and an on-disk one makes it ``realmod``, while both report the same defining file the
+    caller already holds. Both sides being None is the in-memory case, where every symbol
+    from elsewhere still has a real typeshed or site-packages path.
+    """
+    if module_path is None and own_module_path is None:
+        return True
+    if module_path is None or own_module_path is None:
+        return False
+    try:
+        return Path(module_path).resolve() == Path(own_module_path).resolve()
+    except (OSError, ValueError):
+        return False
+
+
+def resolve_import(
+    jedi_name: Any, own_module_path: Path | str | None = None, type_str: str | None = None
+) -> ImportHint | None:
+    """(module, name) import a concrete inferred type needs, or None when not derivable.
+
+    ``own_module_path`` is the file being annotated, which the caller knows and the Jedi
+    object does not. ``type_str`` is the annotation the caller settled on, which is not always
+    the Jedi object's own name -- a binding to a function is annotated ``Callable`` while Jedi
+    resolves the function itself. Passing it keeps the hint about the type being written rather
+    than about the value it was inferred from.
+
+    None when: no object, no/empty full_name, module part is builtins, full_name has no
+    module part, full_name's last component != the bare name, the annotation never mentions
+    that name, or the symbol is defined in ``own_module_path`` and so needs no import at all.
+    Uses full_name, not module_name (module_name is unreliable: deque reports _collections).
+    """
+    if type_str is not None:
+        # A name this module wrote itself resolves to no Jedi object, so its import comes from
+        # the table and takes precedence over whatever the inferred value happened to be.
+        synthesised = import_for_annotation(type_str)
+        if synthesised is not None:
+            return synthesised
+
+    if jedi_name is None:
+        return None
+    try:
+        full_name = jedi_name.full_name
+        bare = str(jedi_name.name)
+        module_path = jedi_name.module_path
+    except Exception:
+        return None
+    if not full_name or "." not in full_name:
+        return None
+    module, _, last = full_name.rpartition(".")
+    if not module or module == "builtins" or last != bare:
+        return None
+    # The annotation is what gets written, so a symbol it never names needs no import. Without
+    # this, `load = json.loads` annotated `Callable` emits an unused `from json import loads`.
+    if type_str is not None and not annotation_mentions_name(type_str, bare):
+        return None
+    # A class defined in this very file is already bound. Importing it writes a module that
+    # imports itself, which mypy accepts and the interpreter rejects on import.
+    if _same_module(module_path, own_module_path):
+        return None
+    return (module, bare)
 
 
 def extract_type_hint(name: Any, inferences: list[Any]) -> str | None:

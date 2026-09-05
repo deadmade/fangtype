@@ -8,8 +8,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from benchmark.lsp_client.factory import ClientBridge
-from benchmark.lsp_client.pool import map_over_bridges
+from benchmark.lsp_client.factory import ClientBridge, map_over_bridge
 from benchmark.mypy_eval.normalizer import normalize_annotation
 from benchmark.mypy_eval.runner import _load_preparation_result
 from benchmark.typeevalpy import official
@@ -317,7 +316,7 @@ def _append_journal(
 def _insert_file(
     bridge: ClientBridge,
     file_manifest: MypyFileManifest,
-    original_dir: Path,
+    uri_base: Path,
     stripped_dir: Path,
 ) -> tuple[MypyInsertionFileResult, list[MypyInsertionTargetResult]]:
     """Drive the server's real insert over one file and classify each target.
@@ -328,15 +327,15 @@ def _insert_file(
     rel = file_manifest.relative_path
     try:
         stripped_source = (stripped_dir / rel).read_text(encoding="utf-8")
-        uri = (original_dir / rel).as_uri()
+        uri = (uri_base / rel).as_uri()
 
         # Inferred facts — the fidelity denominator: every type the server would annotate
         # on this file. did_open=True syncs the STRIPPED text (the on-disk file at ``uri``
         # is still the annotated original), matching the insert call below and the
         # restoration path. This is a second inference pass; the server's DocumentCache
         # absorbs most of the cost when the (uri, version) matches the insert call.
-        hints, preview = bridge.collect_sync(uri, stripped_source, did_open=True)
-        candidates = emit_facts(stripped_source, hints, preview, filename=Path(rel).name)
+        hints, name_facts = bridge.collect_sync(uri, stripped_source, did_open=True)
+        candidates = emit_facts(stripped_source, hints, name_facts, filename=Path(rel).name)
         inferred_counts = _category_counts(candidates)
         inferred_distinct_counts = _distinct_name_counts(candidates)
 
@@ -413,18 +412,25 @@ def _insert_file(
 def _drive_insertion(
     workspace: Path,
     *,
-    make_bridge: Callable[[], ClientBridge],
+    make_bridge: Callable[[str], ClientBridge],
     journal_path: Path | None,
     max_files: int | None,
-    workers: int,
 ) -> MypyInsertionResults:
-    """Shared insertion driver: shard eligible files across ``workers`` bridges.
+    """Shared insertion driver: run every eligible file through one server process.
 
-    Results are reassembled in eligible-file order, so output is identical regardless of
-    worker count. ``make_bridge`` builds each worker's ``ClientBridge``.
+    Results are reassembled in eligible-file order, because resume replays journaled
+    files ahead of the pending ones. ``make_bridge(project_root)`` builds the single
+    ``ClientBridge`` the run drives.
     """
     preparation = _load_preparation_result(workspace)
-    original_dir = Path(preparation.original_dir)
+    # Where the document under test claims to live, and the import root handed to Jedi.
+    # Names the real checkout, whose root is the package's parent, rather than the flat
+    # ``original/`` tree. Passed explicitly rather than left to Jedi's walk-up, which would
+    # otherwise find code/lsp's pyproject.toml above the prepared workspace and resolve the
+    # corpus package through site-packages. ``original/`` is byte-identical to the checkout
+    # (``prepare.py`` writes it verbatim), so only the path and the resolved project move.
+    uri_base = Path(preparation.mypy_dir).resolve()
+    project_root = str(uri_base.parent)
     stripped_dir = Path(preparation.stripped_dir)
 
     journaled = _load_journal(journal_path) if journal_path is not None else {}
@@ -462,7 +468,7 @@ def _drive_insertion(
     def insert(
         bridge: ClientBridge, file_manifest: MypyFileManifest, _index: int
     ) -> tuple[MypyInsertionFileResult, list[MypyInsertionTargetResult]]:
-        return _insert_file(bridge, file_manifest, original_dir, stripped_dir)
+        return _insert_file(bridge, file_manifest, uri_base, stripped_dir)
 
     def report(
         _index: int,
@@ -494,10 +500,9 @@ def _drive_insertion(
         if journal_path is not None:
             _append_journal(journal_path, file_result, file_target_results)
 
-    map_over_bridges(
+    map_over_bridge(
         pending,
-        make_bridge=make_bridge,
-        workers=workers,
+        make_bridge=lambda: make_bridge(project_root),
         fn=insert,
         on_done=report,
     )
@@ -522,15 +527,15 @@ def run_mypy_insertion_benchmark(
     journal_path: Path | None = None,
     engine: str = "jedi",
     max_files: int | None = None,
-    workers: int = 1,
 ) -> MypyInsertionResults:
     """Run the mypy insertion benchmark from a prepared workspace."""
     return _drive_insertion(
         workspace,
-        make_bridge=lambda: ClientBridge(engine=engine, timeout=_LSP_REQUEST_TIMEOUT),
+        make_bridge=lambda project_root: ClientBridge(
+            engine=engine, timeout=_LSP_REQUEST_TIMEOUT, project_root=project_root
+        ),
         journal_path=journal_path,
         max_files=max_files,
-        workers=workers,
     )
 
 

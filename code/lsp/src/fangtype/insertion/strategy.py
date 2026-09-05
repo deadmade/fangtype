@@ -46,7 +46,7 @@ def sanitize_type_annotation(type_str: str) -> str:
     raise ValueError(f"Invalid type annotation syntax: {type_str}")
 
 
-# Stable name per target type; surfaces in preview `plans_by_strategy` and execution summary.
+# Stable name per target type; surfaces in the execution summary.
 _STRATEGY_NAME: dict[TargetType, str] = {
     TargetType.VARIABLE_SIMPLE: "variable_assignment",
     TargetType.VARIABLE_COMPLEX: "complex_assignment",

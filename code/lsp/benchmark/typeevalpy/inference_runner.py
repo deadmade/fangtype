@@ -6,11 +6,11 @@ from __future__ import annotations
 
 import json
 import tempfile
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from benchmark.lsp_client.factory import ClientBridge
-from benchmark.lsp_client.pool import map_over_bridges
+from benchmark.lsp_client.factory import ClientBridge, map_over_bridge
 from benchmark.typeevalpy import official
 from benchmark.typeevalpy.fact_emitter import emit_facts
 
@@ -32,6 +32,9 @@ class InferenceScore:
     sound_count: int  # files where equal_sound == 1 (no false negatives)
     complete_count: int  # files where equal_complete == 1 (no false positives)
     out_root: Path
+    # Exact matches bucketed by python_features/<folder>/, then by FR/FP/LV.
+    # Same shape as TypeEvalPy paper Table 1. Empty when no files were scored.
+    per_folder: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
 
     @property
     def exact_pct(self) -> float:
@@ -112,14 +115,17 @@ def run_predictions(
     engine: str,
     out_root: Path,
     show_progress: bool = True,
-    workers: int = 1,
 ) -> None:
     """Drive the LSP server once per source file, writing one ``*_result.json`` each.
 
     A result file is always written, even when a file yields no facts (empty list) --
-    ``score`` requires every pair to have a corresponding result on disk. Files are
-    sharded across ``workers`` server subprocesses; each writes an independent result
-    path, so the on-disk output is identical regardless of worker count.
+    ``score`` requires every pair to have a corresponding result on disk. Every file
+    goes through one server process, in input order, which is the configuration the tool
+    actually ships in. That says nothing about the *content* of a given result -- two
+    runs have been measured to infer a different candidate set on some files (see
+    ``sec:eval-threats`` in the thesis), and per-process inference state (Jedi's own
+    caching, the server's document cache) is the
+    leading unconfirmed candidate for why.
     """
     if not pairs:
         return
@@ -130,8 +136,8 @@ def run_predictions(
         py_path, _gt_path = pair
         source = py_path.read_text()
         uri = py_path.resolve().as_uri()
-        hints, preview = bridge.collect_sync(uri, source, did_open=False)
-        facts = emit_facts(source, hints, preview, filename=py_path.name)
+        hints, name_facts = bridge.collect_sync(uri, source, did_open=False)
+        facts = emit_facts(source, hints, name_facts, filename=py_path.name)
         facts = official.sort_facts(facts)
 
         result_path = _result_path(py_path, out_root)
@@ -146,10 +152,9 @@ def run_predictions(
         if show_progress and done % _PROGRESS_EVERY == 0:
             print(f"Progress: [{done}/{total}] ({done / total * 100:.1f}%)")
 
-    map_over_bridges(
+    map_over_bridge(
         pairs,
         make_bridge=lambda: ClientBridge(engine=engine),
-        workers=workers,
         fn=predict,
         on_done=report,
     )
@@ -166,6 +171,9 @@ def score(pairs: list[tuple[Path, Path]], out_root: Path, tool_name: str) -> Inf
     per_category: dict[str, dict[str, int]] = {
         cat: {"num_all": 0, "num_caught_exact": 0} for cat in TYPE_CATEGORIES
     }
+    per_folder: dict[str, dict[str, dict[str, int]]] = defaultdict(
+        lambda: {cat: {"num_all": 0, "num_caught_exact": 0} for cat in TYPE_CATEGORIES}
+    )
     sound_count = 0
     complete_count = 0
 
@@ -189,6 +197,12 @@ def score(pairs: list[tuple[Path, Path]], out_root: Path, tool_name: str) -> Inf
             per_category[cat]["num_caught_exact"] += results_only_cat[cat]["num_caught_exact"]
             per_category[cat]["num_all"] += results_cat[1][cat]["num_all"]
 
+        folder = _relative_to_features(py_path).parts[0]
+        bucket = per_folder[folder]
+        for cat in TYPE_CATEGORIES:
+            bucket[cat]["num_caught_exact"] += results_only_cat[cat]["num_caught_exact"]
+            bucket[cat]["num_all"] += results_cat[1][cat]["num_all"]
+
         sound_count += official.equal_sound(str(result_path), str(gt_path))
         complete_count += official.equal_complete(str(result_path), str(gt_path))
 
@@ -202,6 +216,7 @@ def score(pairs: list[tuple[Path, Path]], out_root: Path, tool_name: str) -> Inf
         sound_count=sound_count,
         complete_count=complete_count,
         out_root=out_root,
+        per_folder=dict(per_folder),
     )
 
 
@@ -259,7 +274,6 @@ def run_inference_benchmark(
     tool_name: str = "fangtype",
     out_root: Path | None = None,
     show_progress: bool = True,
-    workers: int = 1,
 ) -> InferenceScore:
     """Run predictions over the LSP server and score them, end to end.
 
@@ -271,7 +285,6 @@ def run_inference_benchmark(
             ``tempfile.mkdtemp`` directory, reported via ``InferenceScore.out_root``
             so results can be inspected afterwards).
         show_progress: print progress lines while predictions run.
-        workers: number of parallel LSP server subprocesses to shard files across.
     """
     pairs = enumerate_pairs(benchmark_dir)
     if not pairs:
@@ -281,5 +294,5 @@ def run_inference_benchmark(
     if out_root is None:
         out_root = Path(tempfile.mkdtemp(prefix="fangtype_te_"))
 
-    run_predictions(pairs, engine, out_root, show_progress, workers=workers)
+    run_predictions(pairs, engine, out_root, show_progress)
     return score(pairs, out_root, tool_name)

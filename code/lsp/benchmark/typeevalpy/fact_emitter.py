@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from benchmark.lsp_client.shim import _collect_structure
+from benchmark.lsp_client.shim import _collect_structure, innermost_enclosing_func
 
 
 def split_types(type_str: str) -> list[str]:
@@ -41,7 +41,7 @@ def _is_meaningful(types: list[str]) -> bool:
 def emit_facts(
     source: str,
     hints: list[tuple[int, int, str, bool]],
-    preview: list[tuple[str, str, int]],
+    name_facts: list[tuple[str, str, int]],
     *,
     filename: str,
 ) -> list[dict]:
@@ -50,7 +50,7 @@ def emit_facts(
     Args:
         source: the document text (used to recover def/param/attribute structure).
         hints: scraped inlay hints as ``(line0, char, type_str, is_return)``.
-        preview: previewInserts entries as ``(name, type_str, line0)``.
+        name_facts: name-keyed facts resolved from inlay hints, as ``(name, type_str, line0)``.
         filename: the ``"file"`` value to stamp on every emitted fact.
 
     Returns:
@@ -61,22 +61,36 @@ def emit_facts(
         attributes, ``"variable"`` (+ ``"function"`` when in-function) for locals).
         No ``"col_offset"`` is emitted -- see ``official.py`` for why.
     """
-    def_lines, param_pos, attr_lines, var_enclosing, def_params, _func_ranges = _collect_structure(
-        source
-    )
+    (
+        def_lines,
+        param_pos,
+        attr_lines,
+        var_enclosing,
+        def_params,
+        func_ranges,
+        _attr_pos,
+        _name_pos,
+    ) = _collect_structure(source)
 
     facts: list[dict] = []
     # (line0, function qname) -> type_str. Hints populate this first; a matching
-    # preview return signal unconditionally overwrites it (preview runs second and
-    # wins), mirroring build_scope_tree's own "preview overwrites hint" precedence.
+    # name_facts return signal unconditionally overwrites it (name_facts runs second
+    # and wins), mirroring build_scope_tree's own "name facts overwrite hint" precedence.
     # Facts are only materialized (and Unknown/empty-filtered) once, at the end, so
-    # a def with both a hint and a preview signal yields exactly one return fact.
+    # a def with both a hint and a name_facts signal yields exactly one return fact.
     return_type_str: dict[tuple[int, str], str] = {}
 
     # Parameters + return fallback from inlay hints.
     for line0, char, type_str, is_return in hints:
-        if is_return and line0 in def_lines:
-            return_type_str[(line0, def_lines[line0])] = type_str
+        if is_return:
+            # A wrapped signature anchors its return hint on the closing-paren line rather
+            # than the def line, so an exact `def_lines` miss falls back to the innermost
+            # function whose range contains the hint's line -- see
+            # `innermost_enclosing_func` for why the smallest span has to win.
+            qname = def_lines.get(line0) or innermost_enclosing_func(line0, func_ranges)
+            if qname is not None:
+                def_line0 = func_ranges.get(qname, (line0, line0))[0]
+                return_type_str[(def_line0, qname)] = type_str
         elif (line0, char) in param_pos:
             qname, param = param_pos[(line0, char)]
             types = split_types(type_str)
@@ -91,15 +105,15 @@ def emit_facts(
                     }
                 )
 
-    # Returns / attributes / locals from previewInserts (name-keyed).
-    for name, type_str, line0 in preview:
+    # Returns / attributes / locals from the name-keyed facts resolved from inlay hints.
+    for name, type_str, line0 in name_facts:
         if line0 in def_lines and def_lines[line0].rsplit(".", 1)[-1] == name:
             return_type_str[(line0, def_lines[line0])] = type_str
             continue
 
         if name in def_params.get(line0, set()):
-            # Parameter preview entry (sits on the ``def`` line) — parameters are
-            # emitted from inlay hints above; not a local variable. Skip so it does
+            # Parameter entry from name_facts (sits on the ``def`` line) — parameters
+            # are emitted from inlay hints above; not a local variable. Skip so it does
             # not pollute the local_variables bucket.
             continue
 
