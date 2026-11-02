@@ -1,153 +1,76 @@
-# Fangtype (VS Code extension)
+# Fangtype for VS Code
 
-Fangtype infers, validates, and inserts Python type annotations. This extension
-launches the Fangtype language server and surfaces its results as inlay hints,
-code actions, and diagnostics. The server itself lives in `code/lsp/`.
+Fangtype shows inferred Python types as inlay hints. Accept hints or use code
+actions to insert annotations; use its commands to insert or remove annotations
+at the cursor or throughout a file. Candidate insertions are checked with mypy
+when `fangtype.mypyEnabled` is enabled.
 
 ## First run
 
-The VSIX is universal: it ships no native/compiled code, so the same package
-works on any OS with a CPython 3.12, 3.13, or 3.14 interpreter.
+Install the VSIX and select a Python 3.12 or newer interpreter with the Microsoft
+Python extension. The VSIX bundles the pure Python Fangtype server; third-party
+dependencies are installed separately.
 
-By default (`fangtype.installMode: managed`) the extension creates a **dedicated
-virtual environment** the first time it starts, installs the server's pinned
-dependencies (mypy, jedi, libcst, …) into it, and launches the server from that
-venv. This env lives under the extension's global storage — **your project and
-global interpreters are never modified**, so there are no version conflicts and
-no PEP 668 "externally-managed-environment" errors. A one-time progress
-notification ("Creating Fangtype environment / Installing server dependencies")
-shows while it builds; subsequent launches reuse it.
+By default, `fangtype.installMode` is `managed`. Fangtype creates a dedicated
+virtual environment under the extension's global storage and installs its
+pinned server dependencies there. It uses your selected project interpreter
+for project-aware inference and validation. First use needs network access to
+install dependencies. On Debian/Ubuntu, the interpreter may need the
+`python3-venv` package.
 
-The venv is built from the interpreter you've selected (see resolution order
-below) and keyed by that interpreter's CPython **minor** version, so switching
-Python versions builds a fresh env rather than reusing an ABI-incompatible one.
-Inference and validation stay **project-aware**: even though the server runs in
-the isolated venv, Jedi and mypy are pointed at your project interpreter, so
-imports of your project's third-party packages still resolve.
+## Settings
 
-> **Debian/Ubuntu:** the managed venv needs the `venv` module. If your `python3`
-> lacks it, the build fails with a clear prompt offering `sudo apt install
-> python3-venv` (or switching to `fromEnvironment`).
+| Setting | Purpose |
+| --- | --- |
+| `fangtype.interpreter` | Interpreter argv array; defaults to the Python extension's selection, then `FANGTYPE_INTERPRETER`. |
+| `fangtype.installMode` | `managed` (default), `fromEnvironment`, or `useBundled`. |
+| `fangtype.mypyEnabled` | Enable mypy diagnostics and validation of candidate annotations. |
+| `fangtype.crossFileContractsEnabled` | Enable inference from cross-file function contracts. |
+| `fangtype.logLevel` | Server logging level; defaults to `warning`. |
+| `fangtype.requestTimeoutSeconds` | Client timeout for insert/remove/preview requests; defaults to 120. |
 
-If you'd rather install into your own selected interpreter instead, set
-`fangtype.installMode` to `fromEnvironment` (see below). Run **Fangtype: Rebuild
-Environment** to recreate the managed venv after corruption or a dependency bump.
+`fromEnvironment` launches under the selected interpreter and offers to install
+missing dependencies into it. This modifies that environment. An editable
+Fangtype install in that environment takes precedence over the bundled server.
 
-## How the server is launched (from source, no binary)
+`useBundled` prioritizes the bundled Fangtype server under the selected
+interpreter. Its third-party dependencies must still be available; only the
+pure Python Fangtype package is bundled.
 
-The extension **runs the server from source under a Python interpreter** — there
-is no PyInstaller binary. At launch it runs:
+Run **Fangtype: Rebuild Environment** to recreate a managed environment, or
+**Fangtype: Restart Language Server** after configuration changes.
 
-```
-<interpreter> bundled/tool/lsp_server.py
-```
+## Commands
 
-`bundled/tool/lsp_server.py` is a small bootstrap: it arranges `sys.path` /
-`PYTHONPATH` according to the import strategy, then hands off to
-`fangtype.server.main`. The interpreter is resolved in this order:
+- **Fangtype: Insert Type Annotation at Cursor** (`Alt+Enter`)
+- **Fangtype: Insert All Type Annotations in File**
+- **Fangtype: Remove Type Annotation at Cursor**
+- **Fangtype: Remove All Type Annotations in File**
 
-1. the `fangtype.interpreter` setting (an argv array, e.g. `["/usr/bin/python"]`);
-2. the interpreter selected via the **Python extension** (`ms-python.python`);
-3. the `FANGTYPE_INTERPRETER` environment variable (escape hatch when
-   `ms-python.python` is not installed).
+## Build and test
 
-If none resolves, the extension reports an error instead of launching.
-
-### `fangtype.installMode`
-
-Decides how the server's Python dependencies are provided:
-
-| Mode              | Behavior                                                                                     |
-| ----------------- | -------------------------------------------------------------------------------------------- |
-| `managed` (default) | Build/own a dedicated venv under global storage; launch the server from it. Never touches your project/global env; inference stays project-aware. |
-| `fromEnvironment` | Launch under the selected interpreter; if its deps are missing, offer to `pip install` them into that interpreter. Mutates the selected env. |
-| `off`             | Don't manage or probe deps. Only valid together with `fangtype.path` (you run your own server). |
-
-`fangtype.path` (below) is the full manual escape hatch and wins over
-`installMode` entirely.
-
-### `fangtype.importStrategy`
-
-Only consulted under `installMode: fromEnvironment` (and `off`/`path`) — **ignored
-under `managed`**, where the venv is the authoritative source of dependencies.
-It decides where Python looks for the `fangtype` package and its dependencies:
-
-| Strategy          | PYTHONPATH order                              | Use for                        |
-| ----------------- | --------------------------------------------- | ------------------------------ |
-| `useBundled`      | `bundled/libs` + `bundled/tool` **prepended** | shipping (self-contained VSIX) |
-| `fromEnvironment` | bundled dirs **appended** (inherited wins)    | dev / tests / editable installs |
-
-Under `fromEnvironment` the interpreter's own environment (or an inherited
-`PYTHONPATH`) provides `fangtype` and its deps, so `bundled/libs` need not exist.
-
-> **ABI caveat (`useBundled`):** `bundled/libs` contains native wheels (libcst
-> and friends) compiled against **one CPython minor version**. A VSIX built for
-> 3.14 will not import under a 3.13/3.15 interpreter. `useBundled` therefore
-> couples the shipped bundle to the interpreter's minor version, and VSIXs are
-> **per-platform** — currently `linux-x64`; other platforms are separate builds.
-
-### Overrides
-
-- `fangtype.interpreter` — argv for the interpreter to run the bootstrap under.
-- `fangtype.path` — run an already-installed server **command directly**,
-  bypassing the interpreter and the bootstrap script entirely.
-- `fangtype.args` — extra arguments appended to the launch.
-
-## Debugging (extension + Python server)
-
-The repo's `.vscode/launch.json` ships three ways to debug from the editor:
-
-- **Run Extension** — F5 launches an Extension Development Host with the
-  extension loaded (no Python debugger).
-- **Debug Extension + Python** (a compound) — the one to pick when you want to
-  step through the **Python language server**. It:
-  1. launches the Extension Development Host with `DEBUG_FANGTYPE=1` and
-     `DEBUG_FANGTYPE_WAIT=1` in its environment, then
-  2. attaches a `debugpy` client to `localhost:5678`.
-
-When `DEBUG_FANGTYPE` is set in the launch environment, the extension runs the
-debug entrypoint `bundled/tool/lsp_runner.py` (instead of `lsp_server.py`). That
-runner starts a `debugpy` listener before booting the server; with
-`DEBUG_FANGTYPE_WAIT` set it blocks until the debugger attaches, so the compound
-works regardless of which side connects first. Set breakpoints anywhere in the
-server sources (`code/lsp/src/fangtype/…`) and they will bind once the attach
-connects.
-
-`debugpy` must be importable by the interpreter running the server (it is a
-dev-only dependency and is **not** shipped in `bundled/libs`). If it is missing,
-`lsp_runner.py` prints a warning to stderr and boots normally — the server still
-runs, it just can't be attached to.
-
-### Debug env knobs
-
-| Variable              | Default     | Effect                                          |
-| --------------------- | ----------- | ----------------------------------------------- |
-| `DEBUG_FANGTYPE`      | _(unset)_   | Any non-empty value runs `lsp_runner.py` and starts the listener. |
-| `DEBUG_FANGTYPE_PORT` | `5678`      | Port the `debugpy` listener binds on `localhost`. |
-| `DEBUG_FANGTYPE_WAIT` | _(unset)_   | Any non-empty value blocks the server until a debugger attaches. |
-
-The `fangtype.path` override never switches to the debug runner (it runs its own
-command directly).
-
-## Building and packaging
-
-Run these **inside `nix develop`** (the dev shell provides Node, Python 3.14, and
-`vsce`; `nox` sessions use `venv_backend=none` and rely on that shell):
+Enter `nix develop` at the repository root, then run from this directory:
 
 ```bash
-npm run build          # esbuild → dist/extension.cjs (fast dev build)
-npm run lint           # eslint (src only)
-npm test               # mocha unit tests against a stubbed vscode module
-nox -s setup           # pip-install deps + the fangtype package into bundled/libs
-nox -s build_package   # full VSIX build (setup + build + vsce package)
-npm run package        # vsce package on its own
+npm ci
+npm test                # typecheck and unit tests using a VS Code stub
+npm run lint
+npm run build           # extension bundle only
+nox -s setup            # bundle Fangtype and copy the dependency lockfile
+nox -s build_package    # setup, build, and package fangtype.vsix
 ```
 
-`nox -s setup` is only needed to populate `bundled/libs` for a `useBundled`
-shipping build.
+Without Nix, install Python development dependencies as described in the
+[root README](../../README.md). The unit tests run under Node without an
+Electron host. Python server tests live in `code/lsp/tests`.
 
-## Tests
+## Debug
 
-`npm test` runs the mocha suites in `test/unit/` under Node, with `vscode`
-stubbed. There is no Electron host and no downloaded VS Code binary. Server
-behaviour is covered by the Python suite in `code/lsp`.
+Open the repository root in VS Code. **Run Extension** starts an Extension
+Development Host. **Debug Extension + Python** also attaches a Python debugger
+to the server on `localhost:5678`; install `debugpy` in the server interpreter
+first.
+
+The debug runner recognizes `DEBUG_FANGTYPE`, `DEBUG_FANGTYPE_WAIT`, and
+`DEBUG_FANGTYPE_PORT` (default `5678`). The compound launch configuration sets
+the first two so the server waits for the debugger to attach.

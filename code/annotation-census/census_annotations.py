@@ -22,7 +22,7 @@ than a committed one, and the check is skipped when it is absent.
 Read-only. It reads the corpus checkout and writes only the JSON file named by ``--output``.
 
     python census_annotations.py
-    python census_annotations.py --output ../../thesis/evaluation/data/mypy_annotation_census.json
+    python census_annotations.py --output ../lsp/benchmark/tmp/mypy_annotation_census.json
 """
 
 from __future__ import annotations

@@ -1,0 +1,52 @@
+# Local environments and tools
+.direnv/
+.env
+.env.*
+.venv/
+venv/
+.idea/
+.claude/
+.codex/
+.agents/
+.superpowers/
+.pre-commit-config.yaml
+.pre-commit-cache/
+.treefmt-cache/
+result
+result-*
+
+# Python caches, tests and builds
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.nox/
+.tox/
+build/
+dist/
+
+# Extension dependencies and generated bundles
+node_modules/
+out/
+*.vsix
+.vscode-test/
+test-results.xml
+code/vscode-extension/bundled/libs/
+code/vscode-extension/bundled/requirements.txt
+code/vscode-extension/workspace/
+
+# Benchmark workspaces and results
+code/lsp/benchmark/tmp/
+
+# Academic material belongs in the private repository
+/thesis/
+/proposal/
+/presentation/
+/poster/
+/comments/

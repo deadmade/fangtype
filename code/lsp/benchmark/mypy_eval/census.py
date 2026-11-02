@@ -13,7 +13,7 @@ corpus that was never built.
 This is read-only over the checkout. It does not touch the prepared workspace, so running
 it cannot invalidate an existing run's artefacts.
 
-    python -m benchmark.mypy_eval.census --output ../../thesis/evaluation/mypy_corpus_census.json
+    python -m benchmark.mypy_eval.census --output benchmark/tmp/mypy_corpus_census.json
 """
 
 from __future__ import annotations
