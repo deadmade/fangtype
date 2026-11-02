@@ -1,0 +1,61 @@
+{
+  "fangtype_version": "0.5.15",
+  "metrics": [
+    {
+      "metric": "TypeEvalPy inference: Fangtype",
+      "source": "typeevalpy_inference.json",
+      "matched": 635,
+      "total": 850,
+      "percent": 74.7
+    },
+    {
+      "metric": "TypeEvalPy inference: Jedi reference",
+      "source": "typeevalpy_inference_jedi.json",
+      "matched": 415,
+      "total": 850,
+      "percent": 48.8
+    },
+    {
+      "metric": "TypeEvalPy insertion yield: gate on",
+      "source": "typeevalpy_insertion.json",
+      "matched": 627,
+      "total": 689,
+      "percent": 91.0
+    },
+    {
+      "metric": "TypeEvalPy insertion yield: gate off",
+      "source": "typeevalpy_insertion_nogate.json",
+      "matched": 660,
+      "total": 689,
+      "percent": 95.8
+    },
+    {
+      "metric": "mypy restoration: annotated context",
+      "source": "mypy_restore.json",
+      "matched": 5547,
+      "total": 16753,
+      "percent": 33.1
+    },
+    {
+      "metric": "mypy restoration: stripped context",
+      "source": "mypy_restore_coldstart.json",
+      "matched": 2888,
+      "total": 16753,
+      "percent": 17.2
+    },
+    {
+      "metric": "mypy insertion: gate on",
+      "source": "mypy_insert.json",
+      "matched": 5106,
+      "total": 16753,
+      "percent": 30.5
+    },
+    {
+      "metric": "mypy insertion: gate off",
+      "source": "mypy_insert_nogate.json",
+      "matched": 5723,
+      "total": 16753,
+      "percent": 34.2
+    }
+  ]
+}

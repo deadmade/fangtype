@@ -1,0 +1,286 @@
+{
+  "tool_name": "jedi",
+  "file_count": 153,
+  "num_all": 850,
+  "num_caught_exact": 415,
+  "num_caught_partial": 3,
+  "per_category": {
+    "function_returns": {
+      "num_all": 230,
+      "num_caught_exact": 115
+    },
+    "function_parameters": {
+      "num_all": 95,
+      "num_caught_exact": 0
+    },
+    "local_variables": {
+      "num_all": 525,
+      "num_caught_exact": 300
+    }
+  },
+  "sound_count": 24,
+  "complete_count": 36,
+  "out_root": "<temporary-directory>",
+  "per_folder": {
+    "args": {
+      "function_returns": {
+        "num_all": 17,
+        "num_caught_exact": 12
+      },
+      "function_parameters": {
+        "num_all": 10,
+        "num_caught_exact": 0
+      },
+      "local_variables": {
+        "num_all": 16,
+        "num_caught_exact": 9
+      }
+    },
+    "assignments": {
+      "function_returns": {
+        "num_all": 21,
+        "num_caught_exact": 20
+      },
+      "function_parameters": {
+        "num_all": 2,
+        "num_caught_exact": 0
+      },
+      "local_variables": {
+        "num_all": 59,
+        "num_caught_exact": 23
+      }
+    },
+    "builtins": {
+      "function_returns": {
+        "num_all": 3,
+        "num_caught_exact": 0
+      },
+      "function_parameters": {
+        "num_all": 4,
+        "num_caught_exact": 0
+      },
+      "local_variables": {
+        "num_all": 61,
+        "num_caught_exact": 30
+      }
+    },
+    "classes": {
+      "function_returns": {
+        "num_all": 40,
+        "num_caught_exact": 0
+      },
+      "function_parameters": {
+        "num_all": 8,
+        "num_caught_exact": 0
+      },
+      "local_variables": {
+        "num_all": 74,
+        "num_caught_exact": 57
+      }
+    },
+    "decorators": {
+      "function_returns": {
+        "num_all": 23,
+        "num_caught_exact": 6
+      },
+      "function_parameters": {
+        "num_all": 17,
+        "num_caught_exact": 0
+      },
+      "local_variables": {
+        "num_all": 12,
+        "num_caught_exact": 8
+      }
+    },
+    "dicts": {
+      "function_returns": {
+        "num_all": 23,
+        "num_caught_exact": 21
+      },
+      "function_parameters": {
+        "num_all": 3,
+        "num_caught_exact": 0
+      },
+      "local_variables": {
+        "num_all": 81,
+        "num_caught_exact": 34
+      }
+    },
+    "direct_calls": {
+      "function_returns": {
+        "num_all": 10,
+        "num_caught_exact": 6
+      },
+      "function_parameters": {
+        "num_all": 5,
+        "num_caught_exact": 0
+      },
+      "local_variables": {
+        "num_all": 9,
+        "num_caught_exact": 6
+      }
+    },
+    "dynamic": {
+      "function_returns": {
+        "num_all": 1,
+        "num_caught_exact": 1
+      },
+      "function_parameters": {
+        "num_all": 0,
+        "num_caught_exact": 0
+      },
+      "local_variables": {
+        "num_all": 8,
+        "num_caught_exact": 2
+      }
+    },
+    "exceptions": {
+      "function_returns": {
+        "num_all": 0,
+        "num_caught_exact": 0
+      },
+      "function_parameters": {
+        "num_all": 0,
+        "num_caught_exact": 0
+      },
+      "local_variables": {
+        "num_all": 2,
+        "num_caught_exact": 1
+      }
+    },
+    "external": {
+      "function_returns": {
+        "num_all": 3,
+        "num_caught_exact": 0
+      },
+      "function_parameters": {
+        "num_all": 1,
+        "num_caught_exact": 0
+      },
+      "local_variables": {
+        "num_all": 12,
+        "num_caught_exact": 2
+      }
+    },
+    "functions": {
+      "function_returns": {
+        "num_all": 10,
+        "num_caught_exact": 4
+      },
+      "function_parameters": {
+        "num_all": 9,
+        "num_caught_exact": 0
+      },
+      "local_variables": {
+        "num_all": 18,
+        "num_caught_exact": 14
+      }
+    },
+    "generators": {
+      "function_returns": {
+        "num_all": 13,
+        "num_caught_exact": 3
+      },
+      "function_parameters": {
+        "num_all": 6,
+        "num_caught_exact": 0
+      },
+      "local_variables": {
+        "num_all": 51,
+        "num_caught_exact": 22
+      }
+    },
+    "imports": {
+      "function_returns": {
+        "num_all": 3,
+        "num_caught_exact": 1
+      },
+      "function_parameters": {
+        "num_all": 0,
+        "num_caught_exact": 0
+      },
+      "local_variables": {
+        "num_all": 22,
+        "num_caught_exact": 17
+      }
+    },
+    "kwargs": {
+      "function_returns": {
+        "num_all": 8,
+        "num_caught_exact": 7
+      },
+      "function_parameters": {
+        "num_all": 6,
+        "num_caught_exact": 0
+      },
+      "local_variables": {
+        "num_all": 8,
+        "num_caught_exact": 6
+      }
+    },
+    "lambdas": {
+      "function_returns": {
+        "num_all": 7,
+        "num_caught_exact": 6
+      },
+      "function_parameters": {
+        "num_all": 16,
+        "num_caught_exact": 0
+      },
+      "local_variables": {
+        "num_all": 11,
+        "num_caught_exact": 11
+      }
+    },
+    "lists": {
+      "function_returns": {
+        "num_all": 17,
+        "num_caught_exact": 17
+      },
+      "function_parameters": {
+        "num_all": 4,
+        "num_caught_exact": 0
+      },
+      "local_variables": {
+        "num_all": 39,
+        "num_caught_exact": 27
+      }
+    },
+    "mro": {
+      "function_returns": {
+        "num_all": 16,
+        "num_caught_exact": 0
+      },
+      "function_parameters": {
+        "num_all": 0,
+        "num_caught_exact": 0
+      },
+      "local_variables": {
+        "num_all": 18,
+        "num_caught_exact": 14
+      }
+    },
+    "returns": {
+      "function_returns": {
+        "num_all": 15,
+        "num_caught_exact": 11
+      },
+      "function_parameters": {
+        "num_all": 4,
+        "num_caught_exact": 0
+      },
+      "local_variables": {
+        "num_all": 24,
+        "num_caught_exact": 17
+      }
+    }
+  },
+  "exact_pct": 48.8235294117647,
+  "fangtype_revision": "d1f1aedd3bd39f8855d57a93f3368ae5a92107a1",
+  "typeevalpy_revision": "3719de115b54eb8da02a0b7ff7114b10d933376d",
+  "fangtype_version": "0.5.15",
+  "jedi_version": "0.20.0",
+  "mypy_version": "2.1.0",
+  "python_version": "3.14.7",
+  "fangtype_dirty": false
+}

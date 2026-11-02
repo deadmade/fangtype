@@ -1,0 +1,73 @@
+{
+  "fangtype_version": "0.5.15",
+  "original_fangtype_revision": "d1f1aedd3bd39f8855d57a93f3368ae5a92107a1",
+  "public_fangtype_revision": "dc7d6a51ea00e82af5845d0b8a36ca2b664a6303",
+  "artifacts": {
+    "mypy_annotation_census.json": {
+      "original_sha256": "ad1d9e096115b425871d804546f5c2e0dfebc834e6071984452d2e86f54a2925",
+      "published_sha256": "ad1d9e096115b425871d804546f5c2e0dfebc834e6071984452d2e86f54a2925",
+      "normalized_fields": {}
+    },
+    "mypy_corpus_census.json": {
+      "original_sha256": "b02cd2cc18af1df1a571cb1a3345bf9bf61ae1fb7e4843fd4d45a6c5822ed5c8",
+      "published_sha256": "9427509ab224f6fe3d49537179d780c153a677c3997a36761967f8da94baa546",
+      "normalized_fields": {}
+    },
+    "mypy_insert.json.gz": {
+      "original_sha256": "d429169499101e0431066e774e7212e8f9a39d6bab4b360557c555e10eee445d",
+      "published_sha256": "d8a6fa361e3bf34a3a1c873f7fae0874ca230be2020f399379a176e7d63f19a8",
+      "normalized_fields": {
+        "workspace": "repository-relative path",
+        "manifest_path": "repository-relative path"
+      }
+    },
+    "mypy_insert_nogate.json.gz": {
+      "original_sha256": "09f5232bc14be03ea5109913db002ffbd34382f6b016465848485bab42c1d5f9",
+      "published_sha256": "232b121ad5824899fa6a9664d67afa06ab39609506057c73406459cb57dcbb02",
+      "normalized_fields": {
+        "workspace": "repository-relative path",
+        "manifest_path": "repository-relative path"
+      }
+    },
+    "mypy_restore.json.gz": {
+      "original_sha256": "acd1c28564e5419f263acf44d319032651f3aa5174234a8f6918bcd8eab32129",
+      "published_sha256": "217ae55bba043d31360978a1bdc7ce49d97e6ad5fdbbdf518d4ddd844e9f62d5",
+      "normalized_fields": {
+        "workspace": "repository-relative path",
+        "manifest_path": "repository-relative path"
+      }
+    },
+    "mypy_restore_coldstart.json.gz": {
+      "original_sha256": "e277be9e5897533b1533ed45838d062a4718d4f651124b147041c00165ca3d8c",
+      "published_sha256": "4eb7878142ca260ef17b755d98d81f9f32238672b7ea2a90859ae9d52e76cf75",
+      "normalized_fields": {
+        "workspace": "repository-relative path",
+        "manifest_path": "repository-relative path"
+      }
+    },
+    "typeevalpy_inference.json": {
+      "original_sha256": "70c829d5e78efd72c20e1a5cc556124345aadd6abb75dacfe4ef48d27a52bb46",
+      "published_sha256": "2f281674a1de2f7d0274b0343cba5b2b9d927c711092e086912976f0e4a0e745",
+      "normalized_fields": {
+        "out_root": "temporary-directory placeholder"
+      }
+    },
+    "typeevalpy_inference_jedi.json": {
+      "original_sha256": "082f218b0490d9dc24a5a9c181518589dad7ec1c481d9dc1c9fc6ae03bf988e1",
+      "published_sha256": "40e2d0a4ab88df8932c644896c3f49235ce22f31d0ee4c5a1476738ebb82afca",
+      "normalized_fields": {
+        "out_root": "temporary-directory placeholder"
+      }
+    },
+    "typeevalpy_insertion.json": {
+      "original_sha256": "d3d941dfba64373d94d1b2357515280a43d4f7a121c163ab525f7e9a3a3dc9b5",
+      "published_sha256": "d3d941dfba64373d94d1b2357515280a43d4f7a121c163ab525f7e9a3a3dc9b5",
+      "normalized_fields": {}
+    },
+    "typeevalpy_insertion_nogate.json": {
+      "original_sha256": "6fff7f227a5795754ee0c2c0b7b9b10a1cb091efe818aa80ad0324a61fde103b",
+      "published_sha256": "6fff7f227a5795754ee0c2c0b7b9b10a1cb091efe818aa80ad0324a61fde103b",
+      "normalized_fields": {}
+    }
+  }
+}

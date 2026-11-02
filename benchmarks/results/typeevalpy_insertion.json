@@ -1,0 +1,35 @@
+{
+  "tool_name": "fangtype-insertion",
+  "file_count": 153,
+  "num_all": 689,
+  "num_caught_exact": 627,
+  "num_caught_partial": 640,
+  "per_category": {
+    "function_returns": {
+      "num_all": 221,
+      "num_caught_exact": 210
+    },
+    "function_parameters": {
+      "num_all": 63,
+      "num_caught_exact": 61
+    },
+    "local_variables": {
+      "num_all": 405,
+      "num_caught_exact": 356
+    }
+  },
+  "sound_count": 115,
+  "modified_file_count": 145,
+  "complete_count": 145,
+  "out_root": "None",
+  "exact_pct": 91.00145137880988,
+  "engine": "jedi",
+  "gate_enabled": true,
+  "fangtype_revision": "d1f1aedd3bd39f8855d57a93f3368ae5a92107a1",
+  "typeevalpy_revision": "3719de115b54eb8da02a0b7ff7114b10d933376d",
+  "fangtype_version": "0.5.15",
+  "jedi_version": "0.20.0",
+  "mypy_version": "2.1.0",
+  "python_version": "3.14.7",
+  "fangtype_dirty": false
+}
